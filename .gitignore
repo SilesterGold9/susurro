@@ -11,3 +11,6 @@ app-tauri/src-tauri/target/
 .tauri-key
 # whisper models + ollama are user-local
 models/
+
+# local agent scaffolding (Conclave), not part of releases
+.opencode/
