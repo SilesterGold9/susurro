@@ -34,6 +34,101 @@ pub fn peak_amplitude(pcm: &[i16]) -> i32 {
     pcm.iter().map(|s| (*s as i32).abs()).max().unwrap_or(0)
 }
 
+/// Energy VAD (v0.1.0): frame-RMS speech detection, zero dependencies.
+/// Good enough for end-of-speech on quiet hardware; a neural VAD
+/// can replace it behind the same port later.
+pub struct EnergyVad {
+    /// RMS threshold in S16 units. Default 800.
+    pub threshold: f32,
+    /// Analysis frame in samples at 16kHz. Default 480 (30ms).
+    pub frame_samples: usize,
+}
+
+impl Default for EnergyVad {
+    fn default() -> Self {
+        Self {
+            threshold: 800.0,
+            frame_samples: 480,
+        }
+    }
+}
+
+impl EnergyVad {
+    fn frame_rms(&self, frame: &[i16]) -> f32 {
+        if frame.is_empty() {
+            return 0.0;
+        }
+        let sum: f64 = frame.iter().map(|s| (*s as f64) * (*s as f64)).sum();
+        (sum / frame.len() as f64).sqrt() as f32
+    }
+
+    /// True if any frame in the chunk exceeds the threshold.
+    pub fn chunk_is_speech(&self, samples: &[i16]) -> bool {
+        samples
+            .chunks(self.frame_samples)
+            .any(|f| self.frame_rms(f) > self.threshold)
+    }
+}
+
+impl susurro_core::ports::VoiceActivityDetectorPort for EnergyVad {
+    fn is_speech(&self, samples: &[i16]) -> bool {
+        self.chunk_is_speech(samples)
+    }
+
+    fn end_of_speech(&self, samples: &[i16]) -> bool {
+        // Stateless single-frame view; hangover lives in VadEndpoint.
+        !self.chunk_is_speech(samples)
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum EndpointDecision {
+    Continue,
+    EndOfSpeech,
+}
+
+/// Stateful end-of-utterance detector: after speech has been heard,
+/// N continuous silent seconds end the utterance.
+pub struct VadEndpoint {
+    pub vad: EnergyVad,
+    /// Silent seconds after speech that end the utterance. Default 1.2.
+    pub silence_secs: f32,
+    heard_speech: bool,
+    silent_secs: f32,
+}
+
+impl Default for VadEndpoint {
+    fn default() -> Self {
+        Self {
+            vad: EnergyVad::default(),
+            silence_secs: 1.2,
+            heard_speech: false,
+            silent_secs: 0.0,
+        }
+    }
+}
+
+impl VadEndpoint {
+    pub fn push(&mut self, samples: &[i16], chunk_secs: f32) -> EndpointDecision {
+        if self.vad.chunk_is_speech(samples) {
+            self.heard_speech = true;
+            self.silent_secs = 0.0;
+            EndpointDecision::Continue
+        } else if self.heard_speech {
+            self.silent_secs += chunk_secs;
+            if self.silent_secs >= self.silence_secs {
+                EndpointDecision::EndOfSpeech
+            } else {
+                EndpointDecision::Continue
+            }
+        } else {
+            // Silence before the user starts talking never ends the utterance;
+            // the caller's max duration caps the wait.
+            EndpointDecision::Continue
+        }
+    }
+}
+
 /// Hardware-free capture for tests and CI.
 pub struct MockCapture {
     chunks: Vec<AudioChunk>,
@@ -315,6 +410,12 @@ impl AudioCapturePort for PipeWireCapture {
     }
 }
 
+/// Record `seconds` of 16kHz mono S16 via the sound server.
+/// Public so the CLI can loop short chunks for VAD auto-stop.
+pub fn record_pipewire(seconds: u64, target: Option<&str>) -> Result<Vec<i16>, CoreError> {
+    record_via_pipewire(seconds, target)
+}
+
 fn record_via_pipewire(seconds: u64, target: Option<&str>) -> Result<Vec<i16>, CoreError> {
     // Prefer pw-record; fall back to parecord (PulseAudio compat).
     if tool_exists("pw-record") {
@@ -483,6 +584,51 @@ mod tests {
         assert!(parse_s16le(&[]).is_empty());
         // Odd trailing byte is dropped, not panicking.
         assert_eq!(parse_s16le(&[0x01]), Vec::<i16>::new());
+    }
+
+    #[test]
+    fn vad_separates_speech_from_silence() {
+        use susurro_core::ports::VoiceActivityDetectorPort;
+        let vad = EnergyVad::default();
+        assert!(!vad.is_speech(&vec![0; 480]));
+        // Loud alternating frames read as speech.
+        let loud: Vec<i16> = (0..480)
+            .map(|i| if i % 2 == 0 { 5000 } else { -5000 })
+            .collect();
+        assert!(vad.is_speech(&loud));
+        assert!(vad.end_of_speech(&vec![0; 480]));
+    }
+
+    #[test]
+    fn endpoint_ends_after_silence_hangover() {
+        let mut ep = VadEndpoint::default();
+        let loud: Vec<i16> = (0..16_000)
+            .map(|i| if i % 2 == 0 { 5000 } else { -5000 })
+            .collect();
+        let silence = vec![0; 16_000];
+        // Leading silence never ends.
+        assert_eq!(ep.push(&silence, 1.0), EndpointDecision::Continue);
+        // Speech resets the silence clock.
+        assert_eq!(ep.push(&loud, 1.0), EndpointDecision::Continue);
+        // 1s of silence is not enough (needs 1.2s).
+        assert_eq!(ep.push(&silence, 1.0), EndpointDecision::Continue);
+        // Past the hangover: end.
+        assert_eq!(ep.push(&silence, 1.0), EndpointDecision::EndOfSpeech);
+    }
+
+    #[test]
+    fn endpoint_speech_resets_hangover() {
+        let mut ep = VadEndpoint::default();
+        let loud: Vec<i16> = (0..16_000)
+            .map(|i| if i % 2 == 0 { 5000 } else { -5000 })
+            .collect();
+        let silence = vec![0; 16_000];
+        assert_eq!(ep.push(&loud, 1.0), EndpointDecision::Continue);
+        assert_eq!(ep.push(&silence, 1.0), EndpointDecision::Continue);
+        // More speech before the hangover expires resets it.
+        assert_eq!(ep.push(&loud, 1.0), EndpointDecision::Continue);
+        assert_eq!(ep.push(&silence, 1.0), EndpointDecision::Continue);
+        assert_eq!(ep.push(&silence, 1.0), EndpointDecision::EndOfSpeech);
     }
 
     #[test]

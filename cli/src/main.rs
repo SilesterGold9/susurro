@@ -24,7 +24,8 @@ enum Cmd {
     },
     /// Record the mic once, transcribe with base.en, paste the result.
     Listen {
-        /// Seconds to record (push-to-talk window in v0.0.1).
+        /// Max seconds to record. With --auto-stop, recording ends
+        /// early on VAD end-of-speech instead of using the full window.
         #[arg(long, default_value_t = 6)]
         seconds: u64,
         /// Path to whisper base.en model. Defaults to $SUSURRO_MODEL.
@@ -36,9 +37,17 @@ enum Cmd {
         /// Print instead of pasting (useful without ydotool).
         #[arg(long, default_value_t = false)]
         stdout: bool,
-        /// Substring matching the mic device name. Defaults to system default.
+        /// PipeWire target node. Defaults to the default source.
         #[arg(long)]
         device: Option<String>,
+        /// Stop recording on VAD end-of-speech (1s chunks, no more
+        /// push-to-talk-only). Chunk gaps apply until v0.4.0 streaming.
+        #[arg(long, default_value_t = false)]
+        auto_stop: bool,
+        /// Transcript cleanup: none (v0.0.1 passthrough) or regex
+        /// (v0.1.0 fallback; Ollama lands when the model is downloaded).
+        #[arg(long, default_value = "none")]
+        cleanup: String,
     },
     /// Wait for the Hyprland hotkey, then run Listen in a loop.
     Daemon {
@@ -52,9 +61,13 @@ enum Cmd {
         mock: bool,
         #[arg(long, default_value_t = false)]
         stdout: bool,
-        /// Substring matching the mic device name. Defaults to system default.
+        /// PipeWire target node. Defaults to the default source.
         #[arg(long)]
         device: Option<String>,
+        #[arg(long, default_value_t = false)]
+        auto_stop: bool,
+        #[arg(long, default_value = "none")]
+        cleanup: String,
     },
     /// Print Hyprland bind snippet for the hotkey socket.
     HyprlandBind {
@@ -74,12 +87,16 @@ fn main() -> anyhow::Result<()> {
             mock,
             stdout,
             device,
+            auto_stop,
+            cleanup,
         } => listen_real(&ListenOpts {
             seconds,
             model,
             mock,
             stdout,
             device,
+            auto_stop,
+            cleanup,
             mock_text: "hello from susurro".into(),
         }),
         Cmd::Daemon {
@@ -89,6 +106,8 @@ fn main() -> anyhow::Result<()> {
             mock,
             stdout,
             device,
+            auto_stop,
+            cleanup,
         } => daemon(
             &socket,
             &ListenOpts {
@@ -97,6 +116,8 @@ fn main() -> anyhow::Result<()> {
                 mock,
                 stdout,
                 device,
+                auto_stop,
+                cleanup,
                 mock_text: "hello from susurro".into(),
             },
         ),
@@ -114,6 +135,8 @@ struct ListenOpts {
     mock: bool,
     stdout: bool,
     device: Option<String>,
+    auto_stop: bool,
+    cleanup: String,
     mock_text: String,
 }
 
@@ -278,15 +301,28 @@ fn listen_real(opts: &ListenOpts) -> anyhow::Result<()> {
 }
 
 fn run_utterance(opts: &ListenOpts, tickets: &TicketRegistry) -> anyhow::Result<()> {
-    use susurro_adapters_cleanup::PassthroughCleanup;
-
     // Capture: PipeWire on Linux (follows the sound server),
     // cpal elsewhere. --device selects the source.
+    // --auto-stop records 1s chunks and ends on VAD end-of-speech
+    // instead of the full window (chunk gaps until v0.4.0 streaming).
     let mut capture: Box<dyn AudioCapturePort> = if opts.mock {
         Box::new(MockCaptureOnce {
             text_len: 1600,
             done: false,
         })
+    } else if opts.auto_stop {
+        #[cfg(target_os = "linux")]
+        {
+            let pcm = record_with_auto_stop(opts)?;
+            Box::new(started_buffer(pcm)?)
+        }
+        #[cfg(not(target_os = "linux"))]
+        {
+            Box::new(match opts.device.as_deref() {
+                Some(dev) => susurro_adapters_audio::CpalCapture::with_device(opts.seconds, dev),
+                None => susurro_adapters_audio::CpalCapture::new(opts.seconds),
+            })
+        }
     } else {
         #[cfg(target_os = "linux")]
         {
@@ -338,10 +374,20 @@ fn run_utterance(opts: &ListenOpts, tickets: &TicketRegistry) -> anyhow::Result<
     };
     let inject: &dyn susurro_core::ports::TextInjectionPort = inject_box.as_ref();
 
+    // Cleanup: none (passthrough) or regex fallback.
+    // Ollama cleanup lands once its model is downloaded (issue #9).
+    let passthrough = susurro_adapters_cleanup::PassthroughCleanup;
+    let regex = susurro_adapters_cleanup::RegexCleanup;
+    let cleanup: &dyn susurro_core::ports::TextPostProcessorPort = match opts.cleanup.as_str() {
+        "regex" => &regex,
+        "none" => &passthrough,
+        other => anyhow::bail!("Unknown --cleanup '{other}'. Use none or regex."),
+    };
+
     let out = Pipeline::run_once(
         capture.as_mut(),
         stt,
-        &PassthroughCleanup,
+        cleanup,
         inject,
         tickets,
         SessionId::generate(),
@@ -362,6 +408,51 @@ fn run_utterance(opts: &ListenOpts, tickets: &TicketRegistry) -> anyhow::Result<
     eprintln!("raw: {}", out.raw_text);
     eprintln!("cleaned: {}", out.cleaned_text);
     Ok(())
+}
+
+/// VAD auto-stop: record 1s chunks up to `opts.seconds`, ending early
+/// on end-of-speech. Chunk-process gaps apply until v0.4.0 streaming.
+#[cfg(target_os = "linux")]
+fn record_with_auto_stop(opts: &ListenOpts) -> anyhow::Result<Vec<i16>> {
+    use susurro_adapters_audio::{peak_amplitude, EndpointDecision, VadEndpoint};
+    let mut endpoint = VadEndpoint::default();
+    let mut pcm_all: Vec<i16> = Vec::new();
+    let max_chunks = opts.seconds.clamp(2, 30);
+    for i in 0..max_chunks {
+        let chunk = susurro_adapters_audio::record_pipewire(1, opts.device.as_deref())
+            .map_err(|e| anyhow::anyhow!("Couldn't capture audio. Check mic permissions: {e}"))?;
+        eprintln!(
+            "chunk {}/{} peak {}",
+            i + 1,
+            max_chunks,
+            peak_amplitude(&chunk)
+        );
+        let decision = endpoint.push(&chunk, 1.0);
+        pcm_all.extend_from_slice(&chunk);
+        if decision == EndpointDecision::EndOfSpeech {
+            eprintln!("end-of-speech detected.");
+            break;
+        }
+    }
+    if pcm_all.is_empty() {
+        anyhow::bail!("Captured zero samples. Is the mic muted in pavucontrol?");
+    }
+    Ok(pcm_all)
+}
+
+/// Wrap already-recorded PCM as a started one-shot capture for the pipeline.
+#[cfg(target_os = "linux")]
+fn started_buffer(pcm: Vec<i16>) -> anyhow::Result<susurro_adapters_audio::MockCapture> {
+    use susurro_adapters_audio::MockCapture;
+    use susurro_core::ports::{AudioCapturePort, AudioChunk};
+    let mut buffered = MockCapture::new(vec![AudioChunk {
+        samples: pcm,
+        is_final: true,
+    }]);
+    buffered
+        .start()
+        .map_err(|e| anyhow::anyhow!("Couldn't start capture: {e}"))?;
+    Ok(buffered)
 }
 
 fn daemon(socket_path: &str, opts: &ListenOpts) -> anyhow::Result<()> {
