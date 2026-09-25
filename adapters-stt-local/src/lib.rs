@@ -58,21 +58,26 @@ impl SpeechToTextPort for WhisperLocal {
                 self.model_path.display()
             )));
         }
-        // v0.0.1: stream raw PCM via temp file to external binary.
-        // Native binding replaces this in later milestones.
+        // v0.0.1: write 16kHz mono S16 WAV to a temp file for the
+        // external binary. Native binding replaces this in later milestones.
         let tmp = std::env::temp_dir().join(format!(
-            "susurro-{}.raw",
+            "susurro-{}.wav",
             susurro_core::SessionId::generate()
         ));
-        let bytes: Vec<u8> = pcm.iter().flat_map(|s| s.to_le_bytes()).collect();
-        std::fs::write(&tmp, &bytes)
+        let wav = encode_wav_16k_mono(pcm);
+        std::fs::write(&tmp, &wav)
             .map_err(|e| CoreError::Transcription(format!("temp write failed: {e}")))?;
+        // NOTE: no --output-txt — that writes a sidecar file and leaves
+        // stdout empty. --no-prints + -nt keeps stdout to transcript only.
         let out = Command::new(&self.binary)
             .arg("-m")
             .arg(&self.model_path)
             .arg("-f")
             .arg(&tmp)
-            .arg("--output-txt")
+            .arg("-l")
+            .arg("en")
+            .arg("--no-prints")
+            .arg("-nt")
             .output();
         let _ = std::fs::remove_file(&tmp);
         match out {
@@ -96,6 +101,28 @@ impl SpeechToTextPort for WhisperLocal {
     }
 }
 
+/// Minimal 16kHz mono S16 WAV encoder (44-byte header, no deps).
+fn encode_wav_16k_mono(pcm: &[i16]) -> Vec<u8> {
+    let data_len = (pcm.len() * 2) as u32;
+    let mut out = Vec::with_capacity(44 + data_len as usize);
+    out.extend_from_slice(b"RIFF");
+    out.extend_from_slice(&(36 + data_len).to_le_bytes());
+    out.extend_from_slice(b"WAVEfmt ");
+    out.extend_from_slice(&16u32.to_le_bytes()); // fmt chunk size
+    out.extend_from_slice(&1u16.to_le_bytes()); // PCM
+    out.extend_from_slice(&1u16.to_le_bytes()); // mono
+    out.extend_from_slice(&16_000u32.to_le_bytes());
+    out.extend_from_slice(&32_000u32.to_le_bytes()); // byte rate
+    out.extend_from_slice(&2u16.to_le_bytes()); // block align
+    out.extend_from_slice(&16u16.to_le_bytes()); // bits per sample
+    out.extend_from_slice(b"data");
+    out.extend_from_slice(&data_len.to_le_bytes());
+    for s in pcm {
+        out.extend_from_slice(&s.to_le_bytes());
+    }
+    out
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -112,5 +139,17 @@ mod tests {
         let w = WhisperLocal::base_en(PathBuf::from("/nonexistent/base.en.bin"));
         let err = w.transcribe(&[1, 2, 3]).unwrap_err().to_string();
         assert!(err.contains("model not found"), "{err}");
+    }
+
+    #[test]
+    fn wav_header_is_valid() {
+        let wav = encode_wav_16k_mono(&[0, 1, -1]);
+        assert_eq!(&wav[0..4], b"RIFF");
+        assert_eq!(&wav[8..12], b"WAVE");
+        assert_eq!(&wav[12..16], b"fmt ");
+        assert_eq!(&wav[36..40], b"data");
+        assert_eq!(wav.len(), 44 + 6);
+        // Sample rate field.
+        assert_eq!(u32::from_le_bytes(wav[24..28].try_into().unwrap()), 16_000);
     }
 }
