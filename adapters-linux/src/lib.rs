@@ -4,9 +4,6 @@
 //! runtime-gated, and non-Linux targets get an actionable error.
 //! This keeps Windows CI green while Linux behaviour is proven.
 
-use std::io::{BufRead, BufReader};
-use std::os::unix::net::UnixListener;
-use std::process::{Command, Stdio};
 use susurro_core::ports::{GlobalHotkeyPort, HotkeyEvent, TextInjectionPort};
 use susurro_core::{CoreError, Ticket};
 
@@ -42,6 +39,8 @@ impl GlobalHotkeyPort for HyprlandSocket {
         }
         #[cfg(target_os = "linux")]
         {
+            use std::io::{BufRead, BufReader};
+            use std::os::unix::net::UnixListener;
             let _ = std::fs::remove_file(&self.socket_path);
             let listener = UnixListener::bind(&self.socket_path)
                 .map_err(|e| CoreError::Config(format!("bind {} failed: {e}", self.socket_path)))?;
@@ -88,6 +87,7 @@ impl TextInjectionPort for LinuxPasteInjector {
         }
         #[cfg(target_os = "linux")]
         {
+            use std::process::{Command, Stdio};
             // 1. Put text on Wayland clipboard.
             let mut child = Command::new("wl-copy")
                 .stdin(Stdio::piped())
