@@ -257,6 +257,151 @@ fn record_mono_16k(seconds: u64, device_want: Option<&str>) -> Result<Vec<i16>, 
     Ok(resample_f32_to_s16_16k(&mono_f32, src_rate))
 }
 
+/// PipeWire capture (Linux default): shells out to `pw-record`
+/// (or `parecord`) so recording follows the running sound server —
+/// default source, mute state, volume — and shows up in pavucontrol.
+/// cpal talks ALSA directly and misses all of that on PipeWire boxes.
+pub struct PipeWireCapture {
+    pub seconds: u64,
+    /// Passed as `pw-record --target`. None = default source.
+    pub target: Option<String>,
+    started: bool,
+}
+
+impl PipeWireCapture {
+    pub fn new(seconds: u64) -> Self {
+        Self {
+            seconds: seconds.clamp(1, 30),
+            target: None,
+            started: false,
+        }
+    }
+
+    pub fn with_target(seconds: u64, target: &str) -> Self {
+        Self {
+            seconds: seconds.clamp(1, 30),
+            target: Some(target.into()),
+            started: false,
+        }
+    }
+}
+
+impl AudioCapturePort for PipeWireCapture {
+    fn start(&mut self) -> Result<(), CoreError> {
+        self.started = true;
+        Ok(())
+    }
+    fn stop(&mut self) -> Result<(), CoreError> {
+        self.started = false;
+        Ok(())
+    }
+    fn next_chunk(&mut self) -> Result<AudioChunk, CoreError> {
+        if !self.started {
+            return Err(CoreError::Capture("capture not started".into()));
+        }
+        let pcm = record_via_pipewire(self.seconds, self.target.as_deref())?;
+        let peak = peak_amplitude(&pcm);
+        if peak < 500 {
+            eprintln!(
+                "susurro: captured near-silence (peak {peak}/32767). \
+                Speak during the recording window; check the mic in pavucontrol \
+                (Recording tab should show susurro while it records)."
+            );
+        }
+        Ok(AudioChunk {
+            samples: pcm,
+            is_final: true,
+        })
+    }
+}
+
+fn record_via_pipewire(seconds: u64, target: Option<&str>) -> Result<Vec<i16>, CoreError> {
+    // Prefer pw-record; fall back to parecord (PulseAudio compat).
+    if tool_exists("pw-record") {
+        record_via_pw_record(seconds, target)
+    } else if tool_exists("parecord") {
+        record_via_parecord(seconds)
+    } else {
+        Err(CoreError::Capture(
+            "Neither pw-record nor parecord found. Install pipewire-audio or libpulse.".into(),
+        ))
+    }
+}
+
+fn tool_exists(bin: &str) -> bool {
+    std::process::Command::new("which")
+        .arg(bin)
+        .output()
+        .map(|o| o.status.success())
+        .unwrap_or(false)
+}
+
+/// `timeout N pw-record --rate 16000 --channels 1 --format s16 -`
+/// streams raw s16le mono to stdout for N seconds.
+fn pw_record_command(seconds: u64, target: Option<&str>) -> std::process::Command {
+    let mut cmd = std::process::Command::new("timeout");
+    cmd.arg(seconds.to_string());
+    cmd.arg("pw-record");
+    cmd.arg("--rate").arg("16000");
+    cmd.arg("--channels").arg("1");
+    cmd.arg("--format").arg("s16");
+    if let Some(t) = target {
+        cmd.arg("--target").arg(t);
+    }
+    cmd.arg("-");
+    cmd
+}
+
+fn record_via_pw_record(seconds: u64, target: Option<&str>) -> Result<Vec<i16>, CoreError> {
+    let out = pw_record_command(seconds, target)
+        .output()
+        .map_err(|e| CoreError::Capture(format!("Couldn't run pw-record: {e}")))?;
+    // timeout exits 124 when it kills pw-record after N seconds — expected.
+    if !(out.status.success() || out.status.code() == Some(124)) {
+        return Err(CoreError::Capture(format!(
+            "pw-record failed: {}",
+            String::from_utf8_lossy(&out.stderr).trim()
+        )));
+    }
+    let pcm = parse_s16le(&out.stdout);
+    if pcm.is_empty() {
+        return Err(CoreError::Capture(
+            "pw-record returned zero samples. Is the default source muted in pavucontrol?".into(),
+        ));
+    }
+    Ok(pcm)
+}
+
+fn record_via_parecord(seconds: u64) -> Result<Vec<i16>, CoreError> {
+    let out = std::process::Command::new("timeout")
+        .arg(seconds.to_string())
+        .arg("parecord")
+        .arg("--rate=16000")
+        .arg("--channels=1")
+        .arg("--format=s16le")
+        .arg("/dev/stdout")
+        .output()
+        .map_err(|e| CoreError::Capture(format!("Couldn't run parecord: {e}")))?;
+    if !(out.status.success() || out.status.code() == Some(124)) {
+        return Err(CoreError::Capture(format!(
+            "parecord failed: {}",
+            String::from_utf8_lossy(&out.stderr).trim()
+        )));
+    }
+    let pcm = parse_s16le(&out.stdout);
+    if pcm.is_empty() {
+        return Err(CoreError::Capture(
+            "parecord returned zero samples. Is the default source muted in pavucontrol?".into(),
+        ));
+    }
+    Ok(pcm)
+}
+
+fn parse_s16le(bytes: &[u8]) -> Vec<i16> {
+    let (chunks, _) = bytes.as_chunks::<2>();
+    chunks.iter().map(|c| i16::from_le_bytes(*c)).collect()
+}
+
 fn resample_f32_to_s16_16k(input: &[f32], src_rate: u32) -> Vec<i16> {
     let dst_rate = SAMPLE_RATE_HZ;
     if src_rate == dst_rate {
@@ -329,5 +474,25 @@ mod tests {
         let c = CpalCapture::with_device(6, "front");
         assert_eq!(c.device_name.as_deref(), Some("front"));
         assert_eq!(c.seconds, 6);
+    }
+
+    #[test]
+    fn parse_s16le_roundtrips() {
+        let bytes = [0x00, 0x00, 0xFF, 0x7F, 0x00, 0x80];
+        assert_eq!(parse_s16le(&bytes), vec![0, 32767, -32768]);
+        assert!(parse_s16le(&[]).is_empty());
+        // Odd trailing byte is dropped, not panicking.
+        assert_eq!(parse_s16le(&[0x01]), Vec::<i16>::new());
+    }
+
+    #[test]
+    fn pw_command_requests_16k_mono() {
+        // Inspect the built command without running it.
+        let dbg = format!("{:?}", pw_record_command(6, None));
+        assert!(dbg.contains("pw-record"), "{dbg}");
+        assert!(dbg.contains("16000"), "{dbg}");
+        let dbg = format!("{:?}", pw_record_command(6, Some("mic")));
+        assert!(dbg.contains("--target"), "{dbg}");
+        assert!(dbg.contains("mic"), "{dbg}");
     }
 }

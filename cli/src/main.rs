@@ -143,7 +143,14 @@ fn doctor() -> anyhow::Result<()> {
         }
         println!("select with: listen --device <name-substring>");
     }
-    for tool in ["wl-copy", "ydotool", "whisper-cli", "socat"] {
+    for tool in [
+        "pw-record",
+        "parecord",
+        "wl-copy",
+        "ydotool",
+        "whisper-cli",
+        "socat",
+    ] {
         let found = which(tool);
         println!(
             "{}: {}",
@@ -273,19 +280,30 @@ fn listen_real(opts: &ListenOpts) -> anyhow::Result<()> {
 fn run_utterance(opts: &ListenOpts, tickets: &TicketRegistry) -> anyhow::Result<()> {
     use susurro_adapters_cleanup::PassthroughCleanup;
 
-    // Capture.
+    // Capture: PipeWire on Linux (follows the sound server),
+    // cpal elsewhere. --device selects the source.
     let mut capture: Box<dyn AudioCapturePort> = if opts.mock {
         Box::new(MockCaptureOnce {
             text_len: 1600,
             done: false,
         })
-    } else if let Some(dev) = opts.device.as_deref() {
-        Box::new(susurro_adapters_audio::CpalCapture::with_device(
-            opts.seconds,
-            dev,
-        ))
     } else {
-        Box::new(susurro_adapters_audio::CpalCapture::new(opts.seconds))
+        #[cfg(target_os = "linux")]
+        {
+            Box::new(match opts.device.as_deref() {
+                Some(dev) => {
+                    susurro_adapters_audio::PipeWireCapture::with_target(opts.seconds, dev)
+                }
+                None => susurro_adapters_audio::PipeWireCapture::new(opts.seconds),
+            })
+        }
+        #[cfg(not(target_os = "linux"))]
+        {
+            Box::new(match opts.device.as_deref() {
+                Some(dev) => susurro_adapters_audio::CpalCapture::with_device(opts.seconds, dev),
+                None => susurro_adapters_audio::CpalCapture::new(opts.seconds),
+            })
+        }
     };
     capture
         .start()
