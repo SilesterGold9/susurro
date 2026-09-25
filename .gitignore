@@ -1,0 +1,5 @@
+/target/
+**/target/
+*.sock
+.env
+.DS_Store
