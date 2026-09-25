@@ -18,6 +18,8 @@ html, body {
   font-family: Inter, system-ui, sans-serif;
   background: transparent;
 }
+html { background: transparent; }
+#root { background: transparent; }
 .wordmark { font-family: Georgia, "Times New Roman", serif; }
 
 /* Floating pill */
@@ -41,7 +43,8 @@ html, body {
 .pill .dot.processing { background: var(--teal); animation: pulse 0.7s infinite; }
 @keyframes pulse { 50% { opacity: 0.35; } }
 .pill canvas { flex: 1; height: 28px; }
-.pill .status { font-size: 12px; opacity: 0.75; min-width: 64px; text-align: right; }
+.pill .status { font-size: 12px; opacity: 0.75; min-width: 64px; max-width: 150px; text-align: right; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.pill .status.error { color: var(--coral); font-size: 11px; }
 .pill.settle { animation: settle 220ms ease-out; }
 @keyframes settle {
   0% { transform: scale(1.04); }

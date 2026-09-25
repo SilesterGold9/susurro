@@ -1,0 +1,1029 @@
+#!/usr/bin/env bash
+# conclave — the Conclave command line tool.
+#
+# v1 ships three verbs: check, clean, uninstall. Later phases add init
+# (commitment F), self-test (commitment D), and the /commands.
+#
+# install.sh sources this file for the verbs, so the ceremony and the CLI
+# share one manifest format and one set of checks. When this file runs
+# standalone it locates its own config dir.
+set -euo pipefail
+
+CONCLAVE_VERSION="0.0.5"
+
+# ---------------------------------------------------------------------------
+# color and output
+# ---------------------------------------------------------------------------
+
+CONCLAVE_TTY=0
+if [ -z "${NO_COLOR:-}" ] && [ -t 1 ] && command -v tput >/dev/null 2>&1; then
+  n="$(tput colors 2>/dev/null || printf '0')"
+  if [ "$n" -ge 8 ] 2>/dev/null; then
+    CONCLAVE_TTY=1
+  fi
+fi
+
+CONCLAVE_INTERACTIVE=0
+[ -t 0 ] && CONCLAVE_INTERACTIVE=1
+
+if [ "$CONCLAVE_TTY" -eq 1 ]; then
+  AMP=$'\033[38;5;214m'        # amber
+  AMB=$'\033[1;38;5;214m'      # bold amber
+  AMQ=$'\033[2;38;5;178m'      # muted amber
+  DIM=$'\033[2m'
+  BLD=$'\033[1m'
+  RST=$'\033[0m'
+else
+  AMP=''; AMB=''; AMQ=''; DIM=''; BLD=''; RST=''
+fi
+
+c_say()   { printf '%b%s%b\n' "$AMP" "$*" "$RST"; }
+c_head()  { printf '%b%s%b\n' "$AMB" "$*" "$RST"; }
+c_dim()   { printf '%b%s%b\n' "$DIM" "$*" "$RST"; }
+c_shade() { printf '%b%s%b\n' "$AMQ" "$*" "$RST"; }
+c_plain() { printf '%s\n' "$*"; }
+c_rule()  { printf '%b%s%b\n' "$AMQ" "────────────────────────────────────────────────────" "$RST"; }
+c_ok()    { printf '%b  [ok]  %s%b\n' "$AMP" "$*" "$RST"; }
+c_bad()   { printf '%b  [!!]  %s%b\n' "$AMB" "$*" "$RST"; }
+c_warn()  { printf '%b  [..]  %s%b\n' "$AMQ" "$*" "$RST"; }
+
+# ---------------------------------------------------------------------------
+# locations
+# ---------------------------------------------------------------------------
+
+# Global root. install.sh overrides this before sourcing when a non-default
+# target was chosen on the command line.
+CONCLAVE_GLOBAL_ROOT="${OPENCODE_CONFIG_DIR:-$HOME/.config/opencode}"
+
+# When run from the installed location ($CONFIG_DIR/bin/conclave) the global
+# root resolves from the script path. Leaving it to the env var above is
+# correct in every normal case; the path fallback covers a moved tree.
+if [ -n "${BASH_SOURCE[0]}" ] && [ -f "${BASH_SOURCE[0]}" ]; then
+  case "${BASH_SOURCE[0]}" in
+    */bin/conclave)
+      CONCLAVE_GLOBAL_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+      ;;
+  esac
+fi
+
+# ---------------------------------------------------------------------------
+# manifest
+# ---------------------------------------------------------------------------
+# One flat file per scope root: "<kind> <relative-path> [cksum]".
+#   tree   a directory tree copied from the repo
+#   file   a single file copied from the repo
+#   config a generated config file tracked by cksum (protected on removal)
+#   link   a symlink outside the root that points back at our install
+# Kinds derive which checks `check` runs and how `clean` removes them.
+
+conclave_manifest() { printf '%s\n' "$1/conclave-manifest.txt"; }
+
+conclave_manifest_add() {
+  local root="$1" kind="$2" rel="$3" sum="${4:-}" mf tmp
+  mf="$(conclave_manifest "$root")"
+  mkdir -p "$root"
+  if [ -f "$mf" ]; then
+    tmp="$mf.$$"
+    grep -vE "^${kind} ${rel}( |$)" "$mf" > "$tmp" || true
+    mv "$tmp" "$mf"
+  fi
+  printf '%s %s%s\n' "$kind" "$rel" "${sum:+ $sum}" >> "$mf"
+}
+
+conclave_read_manifest() {
+  local root="$1" mf
+  mf="$(conclave_manifest "$root")"
+  [ -f "$mf" ] || return 0
+  while IFS= read -r line; do
+    [ -n "$line" ] && printf '%s\n' "$line"
+  done < "$mf"
+}
+
+# is_manifested <root> <rel> — 0 if already recorded in the scope manifest
+is_manifested() {
+  local root="$1" rel="$2" mf
+  mf="$(conclave_manifest "$root")"
+  [ -f "$mf" ] || return 1
+  grep -qE "(^| )${rel}( |$)" "$mf"
+}
+
+# Guards used by install.sh so every write is recorded and reversible.
+conclave_copy_file() { # src dst_root rel
+  local src="$1" dst="$2" rel="$3"
+  mkdir -p "$dst/$(dirname "$rel")"
+  cp "$src" "$dst/$rel"
+  conclave_manifest_add "$dst" file "$rel"
+}
+
+conclave_copy_tree() { # src dst_root rel
+  local src="$1" dst="$2" rel="$3"
+  mkdir -p "$dst/$(dirname "$rel")"
+  cp -r "$src" "$dst/$rel"
+  conclave_manifest_add "$dst" tree "$rel"
+}
+
+conclave_write_config() { # content dst_root rel
+  local content="$1" dst="$2" rel="$3" sum
+  mkdir -p "$dst/$(dirname "$rel")"
+  printf '%s\n' "$content" > "$dst/$rel"
+  sum="$(cksum "$dst/$rel" | awk '{print $1}')"
+  conclave_manifest_add "$dst" config "$rel" "$sum"
+}
+
+# Dedupe path for pstack leftovers and other same-name settlements. The
+# existing tree is moved aside, never deleted, and is not manifest-tracked,
+# so clean/uninstall leave it where it sits.
+conclave_dedupe_backup() { # dst_root rel
+  local dst="$1" rel="$2"
+  local src="$dst/$rel" bak target n=1
+  [ -e "$src" ] || return 0
+  bak="$dst/.conclave-backups"
+  mkdir -p "$bak/$(dirname "$rel")"
+  target="$bak/$rel"
+  while [ -e "$target" ]; do
+    target="$bak/${rel}.${n}"
+    n=$((n + 1))
+  done
+  mv "$src" "$target"
+  c_warn "set aside existing $rel -> $target"
+}
+
+# ---------------------------------------------------------------------------
+# check
+# ---------------------------------------------------------------------------
+
+conclave_check_scope() { # root label; exit 0 clean, 1 broken, 2 not installed
+  local root="$1" label="$2" fail=0 kind rel sum
+  c_rule
+  c_head "  $label"
+  if [ ! -f "$(conclave_manifest "$root")" ]; then
+    c_warn "  nothing seated here yet — no manifest at $root"
+    return 2
+  fi
+  while IFS= read -r line; do
+    read -r kind rel sum <<< "$line"
+    case "$kind" in
+      tree)
+        if [ -d "$root/$rel" ]; then
+          case "$rel" in
+            skills/*) if [ -f "$root/$rel/SKILL.md" ]; then c_ok "skill seated: ${rel#skills/}"; else c_bad "skill incomplete: $rel"; fail=1; fi ;;
+            ledger*)  if [ -f "$root/$rel/schema.md" ] && [ -d "$root/$rel/templates" ]; then c_ok "ledger initializable: $rel"; else c_bad "ledger incomplete: $rel"; fail=1; fi ;;
+            *) c_ok "tree present: $rel" ;;
+          esac
+        else
+          c_bad "missing tree: $rel"; fail=1
+        fi
+        ;;
+      file)
+        if [ -f "$root/$rel" ]; then
+          case "$rel" in
+            agents/*) c_ok "agent seated: ${rel#agents/}" ;;
+            commands/*) c_ok "command seated: ${rel#commands/}" ;;
+            plugin/*) c_ok "plugin present: ${rel#plugin/}" ;;
+            RULES.md) c_ok "rules seated: RULES.md" ;;
+            *) c_ok "file present: $rel" ;;
+          esac
+        else
+          c_bad "missing file: $rel"; fail=1
+        fi
+        ;;
+      link)
+        if [ -L "$rel" ] && [ "$(readlink "$rel" 2>/dev/null || true)" = "$CONCLAVE_GLOBAL_ROOT/bin/conclave" ]; then
+          c_ok "link live: $rel"
+        else
+          c_bad "link degraded: $rel"; fail=1
+        fi
+        ;;
+      config)
+        if [ -f "$root/$rel" ]; then c_ok "config present: $rel"; else c_bad "missing config: $rel"; fail=1; fi
+        ;;
+    esac
+  done < "$(conclave_manifest "$root")"
+  if [ "$fail" -eq 0 ]; then
+    c_rule
+    c_say "  The chamber is in order."
+    return 0
+  fi
+  c_rule
+  c_bad "The chamber is out of order. Re-run the ceremony."
+  return 1
+}
+
+# ---------------------------------------------------------------------------
+# clean / uninstall
+# ---------------------------------------------------------------------------
+
+conclave_remove_scope() { # root label; removes manifest-tracked paths
+  local root="$1" label="$2" kind rel sum count=0
+  c_rule
+  c_head "  Removing from $label"
+  if [ ! -f "$(conclave_manifest "$root")" ]; then
+    c_warn "  nothing recorded at $root; nothing to remove"
+    c_rule
+    return 0
+  fi
+  # reverse order so nested entries come before the trees that held them
+  mapfile -t lines < "$(conclave_manifest "$root")"
+  for (( i = ${#lines[@]} - 1; i >= 0; i-- )); do
+    line="${lines[$i]}"
+    read -r kind rel sum <<< "$line"
+    case "$kind" in
+      tree)
+        [ -d "$root/$rel" ] && rm -rf "$root/$rel" && c_dim "  removed tree: $rel"
+        ;;
+      file)
+        [ -f "$root/$rel" ] && rm -f "$root/$rel" && c_dim "  removed file: $rel"
+        ;;
+      config)
+        if [ -f "$root/$rel" ]; then
+          if [ -n "$sum" ]; then
+            now="$(cksum "$root/$rel" | awk '{print $1}')"
+            if [ "$now" = "$sum" ]; then
+              rm -f "$root/$rel" && c_dim "  removed config: $rel"
+            else
+              c_warn "  $rel changed since install; left in place"
+              continue
+            fi
+          fi
+        fi
+        ;;
+      link)
+        if [ -L "$rel" ] && [ "$(readlink "$rel" 2>/dev/null || true)" = "$CONCLAVE_GLOBAL_ROOT/bin/conclave" ]; then
+          rm -f "$rel" && c_dim "  removed link: $rel"
+        fi
+        ;;
+    esac
+    count=$((count + 1))
+  done
+  rm -f "$(conclave_manifest "$root")"
+  c_rule
+  c_say "  $count entries settled, manifest struck."
+}
+
+conclave_banner() {
+  c_head ""
+  c_head "  ╔═══════════════════════════════════╗"
+  c_head "  ║          C O N C L A V E          ║"
+  c_head "  ║   opencode engineering stack      ║"
+  c_head "  ╚═══════════════════════════════════╝"
+  c_head ""
+}
+
+conclave_usage() {
+  conclave_banner
+  c_plain "conclave $CONCLAVE_VERSION -- the Conclave command line"
+  c_plain ""
+  c_plain "usage:"
+  c_plain "  conclave                     show state-aware recommendations"
+  c_plain "  conclave check [--global|--project <path>]"
+  c_plain "                                  verify an installed scope"
+  c_plain "  conclave clean [--global|--project <path>] [-y]"
+  c_plain "                                  remove Conclave's files from a scope"
+  c_plain "  conclave uninstall [--global|--project <path>] [-y]"
+  c_plain "                                  clean plus removal of generated config"
+  c_plain "  conclave init [-y]           adapt Conclave to this project (interview)"
+  c_plain "  conclave self-test           run ritual self-tests against fixtures"
+  c_plain "  conclave version"
+  c_plain ""
+  c_plain "commands (in opencode):"
+  c_plain "  /constitution               regenerate the per-project constitution"
+  c_plain "  /wizard                     generate a setup wizard script"
+  c_plain "  /verify                     run the verification recipe"
+  c_plain "  /tribunal                   adversarial diff review"
+  c_plain "  /duel                       competing prototypes"
+  c_plain "  /the-file                   reopen the case file"
+  c_plain "  /case-notes                 log a lesson"
+  c_plain "  /the-ledger                 record evidence"
+  c_plain "  /tdd                        test-driven development"
+  c_plain ""
+  c_plain "scopes default to whatever has a manifest: the global config dir and"
+  c_plain "the .opencode/ of the current directory."
+  c_plain ""
+  c_plain "the ceremony lives in install.sh: ./install.sh --help"
+}
+
+# ---------------------------------------------------------------------------
+# command dispatch
+# ---------------------------------------------------------------------------
+
+conclave_confirm() { # prompt default(y|n) -> 0 yes, 1 no
+  local prompt="$1" def="${2:-n}"
+  if [ "$CONCLAVE_INTERACTIVE" -eq 0 ]; then
+    [ "$def" = "y" ] && return 0
+    return 1
+  fi
+  printf '%b%s %b[%s]%b ' "$AMP" "$prompt" "$AMQ" "$def" "$RST"
+  local ans
+  IFS= read -r ans || ans="$def"
+  [ -z "$ans" ] && ans="$def"
+  case "$ans" in
+    y|Y|yes|YES) return 0 ;;
+    *) return 1 ;;
+  esac
+}
+
+conclave_find_scope() { # -> echos chosen roots, one per line: "scope-kind root"
+  local global_hit=0 proj_hit=0
+  [ -f "$(conclave_manifest "$CONCLAVE_GLOBAL_ROOT")" ] && global_hit=1
+  local proj="${PWD}/.opencode"
+  [ -f "$(conclave_manifest "$proj")" ] && proj_hit=1
+
+  local want_global=0 want_proj=0 have_scope=0
+  while [ $# -gt 0 ]; do
+    case "$1" in
+      --global) want_global=1; have_scope=1 ;;
+      --project)
+        [ $# -ge 2 ] || { c_bad "--project needs a path"; return 1; }
+        proj="$2"; proj="${proj%/}/.opencode"; shift
+        want_proj=1; have_scope=1
+        ;;
+      -y|--yes) : ;;
+      *) c_bad "unknown flag for this verb: $1"; return 1 ;;
+    esac
+    shift
+  done
+
+  if [ "$have_scope" -eq 0 ]; then
+    if [ "$global_hit" -eq 1 ] && [ "$proj_hit" -eq 1 ]; then
+      if [ "$CONCLAVE_INTERACTIVE" -eq 1 ]; then
+        c_dim "  a manifest exists globally and in $proj"
+        if conclave_confirm "  clean both? (no limits to global)" "n"; then
+          want_global=1; want_proj=1
+        else
+          want_global=1
+        fi
+      else
+        want_global=1; want_proj=1
+      fi
+    elif [ "$proj_hit" -eq 1 ]; then
+      want_proj=1
+    else
+      want_global=1
+    fi
+  fi
+
+  if [ "$global_hit" -eq 0 ] && [ "$want_global" -eq 1 ] && [ "$have_scope" -eq 0 ]; then
+    want_global=0
+  fi
+
+  [ "$want_global" -eq 1 ] && printf 'global %s\n' "$CONCLAVE_GLOBAL_ROOT"
+  [ "$want_proj" -eq 1 ] && printf 'project %s\n' "$proj"
+  return 0
+}
+
+conclave_cmd_check() {
+  local kind root
+  local found=0 rc=0
+  while read -r kind root; do
+    found=1
+    label="PROJECT — $root"
+    [ "$kind" = "global" ] && label="GLOBAL — $root"
+    conclave_check_scope "$root" "$label" || r=$?
+    if [ "${r:-0}" -ne 0 ]; then
+      rc=1
+    fi
+    r=0
+  done < <(conclave_find_scope "$@")
+  if [ "$found" -eq 0 ]; then
+    c_warn "  nothing to check — no scope resolved."
+    rc=1
+  fi
+  return $rc
+}
+
+conclave_cmd_clean() {
+  local auto=0 args=() scopes=() root
+  for a in "$@"; do
+    case "$a" in
+      -y|--yes) auto=1 ;;
+      *) args+=("$a") ;;
+    esac
+  done
+  while read -r kind root; do
+    scopes+=("$root")
+  done < <(conclave_find_scope "${args[@]}")
+  if [ "${#scopes[@]}" -eq 0 ]; then
+    c_warn "  nothing to clean — no scope resolved."
+    return 0
+  fi
+  if [ "$CONCLAVE_INTERACTIVE" -eq 0 ] && [ "$auto" -eq 0 ]; then
+    c_bad "  no interactive session and no -y; the chamber will not act blind."
+    return 1
+  fi
+  for root in "${scopes[@]}"; do
+    if [ "$auto" -eq 0 ] && ! conclave_confirm "  remove the Conclave manifest from $root?" "n"; then
+      c_shade "  left $root alone."
+      continue
+    fi
+    conclave_remove_scope "$root" "$root"
+  done
+  return 0
+}
+
+conclave_cmd_uninstall() {
+  conclave_cmd_clean "$@"
+}
+
+# ---------------------------------------------------------------------------
+# self-test (commitment D)
+# ---------------------------------------------------------------------------
+
+conclave_cmd_self_test() {
+  local fail=0 repo_dir fixture_dir has_fixtures=0
+
+  # Locate the repo root from the script's position.
+  repo_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+  fixture_dir="$repo_dir/fixtures"
+
+  # Detect if we're in the source repo (has fixtures/) or an installed project.
+  if [ -d "$fixture_dir" ] && [ -f "$fixture_dir/package.json" ]; then
+    has_fixtures=1
+  fi
+
+  c_rule
+  c_head "  Conclave ritual self-test"
+  c_rule
+
+  # --- structural checks ---
+
+  c_say "  checking stack structure..."
+
+  # Agents
+  for agent in cardinal.md mad-prince.md reviewer-code.md reviewer-judgment.md worker.md; do
+    if [ -f "$repo_dir/agents/$agent" ]; then
+      c_ok "agent present: $agent"
+    else
+      c_bad "missing agent: $agent"; fail=1
+    fi
+  done
+
+  # Skills
+  for skill in canons workflow meta create-verification-skill maintain-verification-skill; do
+    if [ -f "$repo_dir/skills/$skill/SKILL.md" ]; then
+      c_ok "skill seated: $skill"
+    else
+      c_bad "missing skill: $skill"; fail=1
+    fi
+  done
+
+  # Commands
+  for cmd in tribunal.md duel.md the-file.md case-notes.md the-ledger.md verify.md maintain-verify.md tdd.md constitution.md wizard.md; do
+    if [ -f "$repo_dir/commands/$cmd" ]; then
+      c_ok "command present: $cmd"
+    else
+      c_bad "missing command: $cmd"; fail=1
+    fi
+  done
+
+  # Plugin
+  if [ -f "$repo_dir/plugin/proof-gate.ts" ]; then
+    c_ok "plugin present: proof-gate.ts"
+  else
+    c_bad "missing plugin: proof-gate.ts"; fail=1
+  fi
+
+  # Ledger
+  if [ -f "$repo_dir/ledger/schema.md" ] && [ -d "$repo_dir/ledger/templates" ]; then
+    c_ok "ledger initializable"
+  else
+    c_bad "ledger incomplete"; fail=1
+  fi
+
+  # Wizard template
+  if [ -f "$repo_dir/lib/wizard-template.sh" ]; then
+    c_ok "wizard template present"
+  else
+    c_bad "missing wizard template"; fail=1
+  fi
+
+  # --- fixture checks (source repo only) ---
+
+  if [ "$has_fixtures" -eq 1 ]; then
+    c_say "  checking fixture repo..."
+
+    if [ -f "$fixture_dir/package.json" ] && [ -f "$fixture_dir/src/store.js" ] && [ -f "$fixture_dir/src/server.js" ]; then
+      c_ok "fixture repo present"
+    else
+      c_bad "fixture repo incomplete"; fail=1
+    fi
+
+    # Check for the planted bugs.
+    if grep -q "sk-fixture-test-key-do-not-commit" "$fixture_dir/src/server.js" 2>/dev/null; then
+      c_ok "planted bug present: hardcoded API key"
+    else
+      c_bad "missing planted bug: hardcoded API key"; fail=1
+    fi
+
+    if grep -q "javascript:" "$fixture_dir/src/store.js" 2>/dev/null && ! grep -qE "^\s*(return|if).*data:" "$fixture_dir/src/store.js" 2>/dev/null; then
+      c_ok "planted bug present: incomplete URL validation"
+    else
+      c_bad "missing planted bug: incomplete URL validation"; fail=1
+    fi
+  else
+    c_dim "  fixture repo not found (installed project); skipping fixture checks"
+  fi
+
+  # --- project checks ---
+
+  if [ -f "${PWD}/.opencode/opencode.json" ]; then
+    c_ok "project config wired"
+  else
+    c_warn "project config not wired (run: conclave init)"
+  fi
+
+  if [ -f "${PWD}/.opencode/ledger/the-file.md" ]; then
+    c_ok "ledger the-file present"
+  else
+    c_warn "ledger the-file missing"
+  fi
+
+  if [ -f "${PWD}/.opencode/constitution.md" ]; then
+    c_ok "constitution present"
+  else
+    c_warn "constitution missing (run: conclave init)"
+  fi
+
+  # --- proof-gate smoke test ---
+
+  c_say "  running proof-gate smoke test..."
+
+  if command -v node >/dev/null 2>&1; then
+    local smoke_result
+    smoke_result="$(cd "$repo_dir" && node -e "
+      import('./plugin/proof-gate.ts').then(({ assess }) => {
+        // Case 1: claim with evidence should pass.
+        const r1 = assess('Done! Tests passed and the build exited 0.')
+        console.log('case1_claim=' + r1.claim + ' case1_flagged=' + r1.flagged)
+
+        // Case 2: claim without evidence should be flagged.
+        const r2 = assess('Done, this should work now.')
+        console.log('case2_claim=' + r2.claim + ' case2_flagged=' + r2.flagged)
+
+        // Case 3: no claim should not trigger.
+        const r3 = assess('Let me check the tests first.')
+        console.log('case3_claim=' + r3.claim + ' case3_flagged=' + r3.flagged)
+      }).catch(e => { console.error(e); process.exit(1) })
+    " 2>&1)" || true
+
+    if echo "$smoke_result" | grep -q "case1_claim=true case1_flagged=false" && \
+       echo "$smoke_result" | grep -q "case2_claim=true case2_flagged=true" && \
+       echo "$smoke_result" | grep -q "case3_claim=false case3_flagged=false"; then
+      c_ok "proof-gate smoke test passed"
+    else
+      c_bad "proof-gate smoke test failed"
+      c_dim "  output: $smoke_result"
+      fail=1
+    fi
+  else
+    c_warn "node not found; skipping proof-gate smoke test"
+  fi
+
+  # --- result ---
+
+  c_rule
+  if [ "$fail" -eq 0 ]; then
+    c_say "  All ritual self-tests passed. The chamber is sound."
+    return 0
+  fi
+  c_bad "Some self-tests failed. The chamber is compromised."
+  return 1
+}
+
+
+
+# ---------------------------------------------------------------------------
+# init — adapt Conclave to this project (interview + constitution)
+# ---------------------------------------------------------------------------
+
+conclave_cmd_init() {
+  local proj_dir="${PWD}"
+  local opencode_dir="$proj_dir/.opencode"
+  local ledger_dir="$opencode_dir/ledger"
+  local constitution="$opencode_dir/constitution.md"
+  local non_interactive=0
+
+  while [ $# -gt 0 ]; do
+    case "$1" in
+      --non-interactive|--yes|-y) non_interactive=1 ;;
+      *) c_bad "unknown flag: $1"; return 1 ;;
+    esac
+    shift
+  done
+
+  c_rule
+  c_head "  Conclave init — adapting to this project"
+  c_rule
+
+  if [ ! -f "$(conclave_manifest "$opencode_dir")" ]; then
+    c_bad "Conclave is not installed in this project."
+    c_dim "  Run: ./install.sh --project ."
+    return 1
+  fi
+
+  # --- Phase 1: Scan (silent, fast) ---
+
+  local lang="unknown" pkg_mgr="" test_cmd="" build_cmd="" start_cmd=""
+  local project_name="" has_ci=0 has_agents=0 has_docs=0
+  local lint_cmd="" typecheck_cmd="" has_env_example=0 has_docker=0
+
+  if [ -f "$proj_dir/package.json" ]; then
+    project_name=$(grep -o '"name"[[:space:]]*:[[:space:]]*"[^"]*"' "$proj_dir/package.json" 2>/dev/null | head -1 | sed 's/.*"name"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/')
+  fi
+  [ -z "$project_name" ] && project_name=$(basename "$proj_dir")
+
+  if [ -f "$proj_dir/package.json" ]; then
+    lang="node"
+    if [ -f "$proj_dir/pnpm-lock.yaml" ]; then pkg_mgr="pnpm"
+    elif [ -f "$proj_dir/yarn.lock" ]; then pkg_mgr="yarn"
+    elif [ -f "$proj_dir/bun.lockb" ]; then pkg_mgr="bun"
+    else pkg_mgr="npm"
+    fi
+    test_cmd="$pkg_mgr test"; build_cmd="$pkg_mgr build"; start_cmd="$pkg_mgr start"
+    if ! grep -q '"test"' "$proj_dir/package.json" 2>/dev/null; then test_cmd=""; fi
+    if ! grep -q '"build"' "$proj_dir/package.json" 2>/dev/null; then build_cmd=""; fi
+    if ! grep -q '"start"' "$proj_dir/package.json" 2>/dev/null; then start_cmd=""; fi
+    if grep -q '"lint"' "$proj_dir/package.json" 2>/dev/null; then lint_cmd="$pkg_mgr run lint"; fi
+    if grep -q '"typecheck"' "$proj_dir/package.json" 2>/dev/null; then typecheck_cmd="$pkg_mgr run typecheck"; fi
+    [ -f "$proj_dir/tsconfig.json" ] && typecheck_cmd="${typecheck_cmd:-npx tsc --noEmit}"
+  elif [ -f "$proj_dir/requirements.txt" ] || [ -f "$proj_dir/pyproject.toml" ] || [ -f "$proj_dir/setup.py" ]; then
+    lang="python"
+    if command -v pytest >/dev/null 2>&1; then test_cmd="pytest"
+    elif command -v python >/dev/null 2>&1; then test_cmd="python -m pytest"
+    fi
+    [ -f "$proj_dir/pyproject.toml" ] && grep -q "build-system" "$proj_dir/pyproject.toml" 2>/dev/null && build_cmd="python -m build"
+    start_cmd="python app.py"
+    [ -f "$proj_dir/.flake8" ] || grep -q "flake8" "$proj_dir/pyproject.toml" 2>/dev/null && lint_cmd="flake8"
+    command -v mypy >/dev/null 2>&1 && typecheck_cmd="mypy ."
+  elif [ -f "$proj_dir/Cargo.toml" ]; then
+    lang="rust"; test_cmd="cargo test"; build_cmd="cargo build"; start_cmd="cargo run"
+    lint_cmd="cargo clippy"; typecheck_cmd="cargo check"
+  elif [ -f "$proj_dir/go.mod" ]; then
+    lang="go"; test_cmd="go test ./..."; build_cmd="go build ./..."; start_cmd="go run ."
+    lint_cmd="golangci-lint run"; typecheck_cmd="go vet ./..."
+  elif [ -f "$proj_dir/Makefile" ]; then
+    lang="make"
+    grep -q "^test:" "$proj_dir/Makefile" 2>/dev/null && test_cmd="make test"
+    grep -q "^build:" "$proj_dir/Makefile" 2>/dev/null && build_cmd="make build"
+    grep -q "^run:" "$proj_dir/Makefile" 2>/dev/null && start_cmd="make run"
+  elif [ -f "$proj_dir/CMakeLists.txt" ]; then
+    lang="c/c++"; build_cmd="cmake --build build"
+  fi
+
+  [ -f "$proj_dir/.env.example" ] && has_env_example=1
+  [ -f "$proj_dir/.env.sample" ] && has_env_example=1
+  [ -f "$proj_dir/docker-compose.yml" ] && has_docker=1
+  [ -f "$proj_dir/docker-compose.yaml" ] && has_docker=1
+  [ -d "$proj_dir/.github/workflows" ] && has_ci=1
+  [ -f "$proj_dir/.gitlab-ci.yml" ] && has_ci=1
+  [ -f "$proj_dir/.circleci/config.yml" ] && has_ci=1
+  [ -f "$proj_dir/AGENTS.md" ] && has_agents=1
+  [ -d "$proj_dir/docs" ] && has_docs=1
+  [ -f "$proj_dir/README.md" ] && has_docs=1
+
+  # --- Phase 2: Interview ---
+
+  local project_purpose="" project_constraints="" project_gotchas=""
+  local done_meaning=""
+
+  if [ "$non_interactive" -eq 1 ]; then
+    project_purpose="(detected: $lang project)"
+    project_constraints="(none specified)"
+    project_gotchas="(none detected)"
+    done_meaning="run the test and build commands"
+  else
+    c_say ""
+    c_say "  I detected a $lang project called $project_name."
+    [ -n "$pkg_mgr" ] && c_say "  Package manager: $pkg_mgr"
+    [ -n "$test_cmd" ] && c_say "  Test: $test_cmd"
+    [ -n "$build_cmd" ] && c_say "  Build: $build_cmd"
+    [ "$has_ci" -eq 1 ] && c_say "  CI: yes" || c_say "  CI: no"
+    c_say ""
+
+    # Round 1: Project identity
+    c_head "  Round 1: Project identity"
+    c_say ""
+    printf '%b  What is this project for? %b[Enter to skip]%b ' "$AMP" "$AMQ" "$RST"
+    IFS= read -r project_purpose || project_purpose=""
+    [ -z "$project_purpose" ] && project_purpose="(detected: $lang project)"
+
+    printf '%b  What must future work preserve? %b[none]%b ' "$AMP" "$AMQ" "$RST"
+    IFS= read -r project_constraints || project_constraints=""
+    [ -z "$project_constraints" ] && project_constraints="(none specified)"
+    c_say ""
+
+    # Round 2: Engineering posture
+    c_head "  Round 2: Engineering posture"
+    c_say ""
+    c_say "  What does done look like? I detected test/build commands."
+    c_say "  Is that the proof, or is there more?"
+    printf '%b  Done means: %b[Enter to accept detected]%b ' "$AMP" "$AMQ" "$RST"
+    IFS= read -r done_meaning || done_meaning=""
+    [ -z "$done_meaning" ] && done_meaning="run the test and build commands"
+
+    c_say ""
+    c_say "  What are the gotchas? Flaky tests, env vars, port conflicts?"
+    printf '%b  Gotchas: %b[none]%b ' "$AMP" "$AMQ" "$RST"
+    IFS= read -r project_gotchas || project_gotchas=""
+    [ -z "$project_gotchas" ] && project_gotchas="(none detected)"
+    c_say ""
+
+    # Round 3: Confirmation
+    c_head "  Round 3: Confirmation"
+    c_say ""
+    c_say "  I will write .opencode/constitution.md with:"
+    c_say "    Project: $project_name ($lang)"
+    c_say "    Purpose: $project_purpose"
+    c_say "    Constraints: $project_constraints"
+    c_say "    Done: $done_meaning"
+    c_say "    Gotchas: $project_gotchas"
+    c_say "    Canons: all 10 adopted"
+    c_say ""
+
+    if ! conclave_confirm "  Write the constitution?" "y"; then
+      c_say "  Constitution not written. Run conclave init again when ready."
+      return 0
+    fi
+  fi
+
+  # --- Phase 3: Write constitution ---
+
+  local canons="prove-it-works fix-root-causes idempotent subtract-before-you-add migrate-callers encode-lessons-in-structure boundary-discipline model-the-domain type-system-honesty never-block-on-the-human"
+  local canon_notes=""
+  if [ "$lang" = "node" ] && [ -f "$proj_dir/tsconfig.json" ]; then
+    canon_notes="type-system-honesty is enforced by TypeScript compiler"
+  elif [ "$lang" = "python" ]; then
+    canon_notes="type-system-honesty applies but is not enforced by the language; use mypy or pyright if available"
+  elif [ "$lang" = "rust" ]; then
+    canon_notes="type-system-honesty is enforced by the Rust compiler"
+  fi
+
+  if [ -f "$constitution" ]; then
+    c_warn "constitution exists; skipping (delete it to regenerate)"
+  else
+    {
+      echo "# Constitution -- $project_name"
+      echo ""
+      echo "Per-project profile. Generated by \`conclave init\`. Edit as the"
+      echo "project evolves. The chamber reads this before ruling."
+      echo ""
+      echo "## Project"
+      echo ""
+      echo "- **name:** $project_name"
+      echo "- **language:** $lang"
+      [ -n "$pkg_mgr" ] && echo "- **package manager:** $pkg_mgr"
+      [ "$has_ci" -eq 1 ] && echo "- **CI:** yes"
+      [ "$has_docs" -eq 1 ] && echo "- **docs:** yes"
+      [ "$has_agents" -eq 1 ] && echo "- **AGENTS.md:** yes"
+      echo ""
+      echo "## Purpose"
+      echo ""
+      echo "$project_purpose"
+      echo ""
+      echo "## Constraints"
+      echo ""
+      echo "$project_constraints"
+      echo ""
+      echo "## Canons in force"
+      echo ""
+      for c in $canons; do
+        echo "- **$c** -- adopted"
+      done
+      [ -n "$canon_notes" ] && { echo ""; echo "**Notes:** $canon_notes"; }
+      echo ""
+      echo "## Prove it works"
+      echo ""
+      echo "Done means: $done_meaning"
+      echo ""
+      echo "### Run"
+      echo ""
+      [ -n "$test_cmd" ] && echo "- \`$test_cmd\`"
+      [ -n "$build_cmd" ] && echo "- \`$build_cmd\`"
+      [ -n "$start_cmd" ] && echo "- \`$start_cmd\`"
+      [ -n "$lint_cmd" ] && echo "- \`$lint_cmd\`"
+      [ -n "$typecheck_cmd" ] && echo "- \`$typecheck_cmd\`"
+      [ -z "$test_cmd" ] && [ -z "$build_cmd" ] && [ -z "$start_cmd" ] && echo "- (no commands detected)"
+      echo ""
+      echo "### Prove"
+      echo ""
+      [ -n "$test_cmd" ] && echo "- \`$test_cmd\` exits 0 with all tests passing"
+      [ -n "$build_cmd" ] && echo "- \`$build_cmd\` exits 0 with no errors"
+      [ -n "$lint_cmd" ] && echo "- \`$lint_cmd\` exits 0"
+      [ -n "$typecheck_cmd" ] && echo "- \`$typecheck_cmd\` exits 0"
+      [ -z "$test_cmd" ] && [ -z "$build_cmd" ] && echo "- (add what passing looks like here)"
+      echo ""
+      echo "### Gotchas"
+      echo ""
+      echo "- $project_gotchas"
+      echo ""
+      echo "## CI"
+      echo ""
+      if [ "$has_ci" -eq 1 ]; then
+        echo "CI runs in this repo. Replicate locally:"
+        [ -d "$proj_dir/.github/workflows" ] && echo "- \`act\` or check \`.github/workflows/\`"
+        [ -n "$test_cmd" ] && echo "- \`$test_cmd\`"
+        [ -n "$lint_cmd" ] && echo "- \`$lint_cmd\`"
+      else
+        echo "No CI detected."
+      fi
+      echo ""
+      echo "## Boundaries"
+      echo ""
+      echo "- (where does validation happen?)"
+      echo ""
+      echo "## Domain"
+      echo ""
+      echo "- (core types, states, registries)"
+    } > "$constitution"
+    c_ok "constitution generated at $constitution"
+  fi
+
+  # --- Verification skill (backward compat) ---
+
+  local skill_dir="$opencode_dir/skills/verification"
+  mkdir -p "$skill_dir"
+  local verify_skill="$skill_dir/SKILL.md"
+  if [ -f "$verify_skill" ]; then
+    c_warn "verification skill exists; skipping"
+  else
+    {
+      echo "---"
+      echo "name: verification"
+      echo "description: \"How to prove a change works in this project.\""
+      echo "---"
+      echo ""
+      echo "# Verification"
+      echo ""
+      echo "Generated from the constitution. Run \`/constitution\` to update."
+      echo ""
+      echo "## Run"
+      [ -n "$test_cmd" ] && echo "- \`$test_cmd\`"
+      [ -n "$build_cmd" ] && echo "- \`$build_cmd\`"
+      [ -n "$start_cmd" ] && echo "- \`$start_cmd\`"
+      [ -z "$test_cmd" ] && [ -z "$build_cmd" ] && echo "- (no commands detected)"
+      echo ""
+      echo "## Prove"
+      [ -n "$test_cmd" ] && echo "- \`$test_cmd\` exits 0"
+      [ -n "$build_cmd" ] && echo "- \`$build_cmd\` exits 0"
+      [ -z "$test_cmd" ] && [ -z "$build_cmd" ] && echo "- (add what passing looks like)"
+      echo ""
+      echo "## Gotchas"
+      echo "- $project_gotchas"
+    } > "$verify_skill"
+    c_ok "verification skill generated"
+  fi
+
+  # --- the-file ---
+
+  local thefile="$ledger_dir/the-file.md"
+  if [ -f "$thefile" ]; then
+    if ! grep -q "## Open questions" "$thefile" 2>/dev/null || [ "$(wc -l < "$thefile")" -lt 12 ]; then
+      c_dim "  the-file already has content; skipping"
+    else
+      cat > "$thefile" << THEFILE
+# Case file
+
+The resume file. Read before acting, append before leaving.
+
+## Open questions
+- (none yet -- conclave init just ran)
+
+## Pending rulings
+- [ ] (none yet)
+
+## Next actions
+- review the constitution at .opencode/constitution.md
+- verify by running its commands end to end
+- fill in gotchas and boundaries
+
+## Closed this session
+- conclave init adapted the stack to $project_name
+THEFILE
+      c_dim "  the-file initialized"
+    fi
+  fi
+
+  # --- Phase 4: Recommend next steps ---
+
+  c_rule
+  c_say "  Constitution written. Next steps:"
+  c_say ""
+  [ -n "$test_cmd" ] && c_say "    conclave check          verify the install"
+  c_say "    /constitution           regenerate the constitution"
+  [ "$has_env_example" -eq 1 ] && c_say "    /wizard                 set up env vars and secrets"
+  c_say "    /verify                 run the verification recipe"
+  c_rule
+  c_say "  Done. Restart opencode for the laws to load."
+  c_dim "  Constitution: $constitution"
+}
+
+# ---------------------------------------------------------------------------
+# recommendations — state-aware next actions
+# ---------------------------------------------------------------------------
+
+conclave_cmd_recommendations() {
+  local proj_dir="${PWD}"
+  local opencode_dir="$proj_dir/.opencode"
+  local found=0
+
+  c_rule
+  c_head "  Next actions"
+  c_rule
+
+  # Check constitution.
+  if [ ! -f "$opencode_dir/constitution.md" ]; then
+    c_say "  [!] No constitution. Run: conclave init"
+    found=1
+  fi
+
+  # Check verification skill.
+  if [ -f "$opencode_dir/skills/verification/SKILL.md" ]; then
+    local last_modified
+    last_modified=$(stat -c %Y "$opencode_dir/skills/verification/SKILL.md" 2>/dev/null || echo 0)
+    local now
+    now=$(date +%s)
+    local age_days=$(( (now - last_modified) / 86400 ))
+    if [ "$age_days" -gt 30 ]; then
+      c_say "  [!] Verification skill is $age_days days old. Run: /maintain-verify"
+      found=1
+    fi
+  fi
+
+  # Check ledger.
+  if [ ! -f "$opencode_dir/ledger/the-file.md" ]; then
+    c_say "  [!] Ledger missing. Run: conclave init"
+    found=1
+  else
+    local verdict_count=0
+    [ -d "$opencode_dir/ledger/verdicts" ] && verdict_count=$(find "$opencode_dir/ledger/verdicts" -name "*.md" 2>/dev/null | wc -l)
+    if [ "$verdict_count" -eq 0 ]; then
+      c_say "  [..] Ledger has no verdicts yet. File evidence with /the-ledger"
+      found=1
+    fi
+  fi
+
+  # Check env setup.
+  if [ -f "$proj_dir/.env.example" ] && [ ! -f "$proj_dir/.env" ]; then
+    c_say "  [!] .env.example exists but .env does not. Run: /wizard"
+    found=1
+  fi
+
+  # Check for hardcoded secrets.
+  local secret_hits=""
+  for pattern in "sk-" "api_key" "apikey" "API_KEY" "secret" "password" "token"; do
+    local hits
+    hits=$(grep -rl --include="*.js" --include="*.ts" --include="*.py" --include="*.go" --include="*.rs" -i "$pattern" "$proj_dir/src" "$proj_dir/lib" "$proj_dir/app" 2>/dev/null | head -3)
+    if [ -n "$hits" ]; then
+      secret_hits="$secret_hits $hits"
+    fi
+  done
+  if [ -n "$secret_hits" ]; then
+    c_say "  [!!] Possible hardcoded secrets found:$secret_hits"
+    found=1
+  fi
+
+  # Git state.
+  if command -v git >/dev/null 2>&1 && git rev-parse --is-inside-work-tree >/dev/null 2>&1; then
+    local dirty
+    dirty=$(git status --porcelain 2>/dev/null | wc -l)
+    if [ "$dirty" -gt 0 ]; then
+      c_say "  [..] $dirty uncommitted file(s). Ready to verify or commit."
+      found=1
+    fi
+  fi
+
+  if [ "$found" -eq 0 ]; then
+    c_say "  The chamber is in order. No urgent actions."
+  fi
+  c_rule
+}
+conclave_main() {
+  local cmd="${1:-}"
+  shift 2>/dev/null || true
+  if [ "$cmd" = version ] || [ "$cmd" = --version ] || [ "$cmd" = -v ]; then
+    c_say "conclave $CONCLAVE_VERSION"
+    return 0
+  fi
+  if [ "$cmd" = help ] || [ "$cmd" = --help ] || [ "$cmd" = -h ] || [ "$cmd" = "" ]; then
+    conclave_usage
+    # Show recommendations when invoked bare.
+    [ -z "$1" ] && conclave_cmd_recommendations 2>/dev/null || true
+    return 0
+  fi
+  case "$cmd" in
+    check) conclave_cmd_check "$@" ;;
+    clean) conclave_cmd_clean "$@" ;;
+    uninstall) conclave_cmd_uninstall "$@" ;;
+    init) conclave_cmd_init "$@" ;;
+    self-test) conclave_cmd_self_test "$@" ;;
+    recommend|next) conclave_cmd_recommendations "$@" ;;
+    *)
+      c_bad "unknown verb: $cmd"
+      conclave_usage >&2
+      return 1
+      ;;
+  esac
+}
+
+if [ "${BASH_SOURCE[0]}" = "$0" ]; then
+  conclave_main "$@"
+fi

@@ -170,7 +170,21 @@ fn resolve_model(explicit: &Option<String>) -> String {
         return shellexpand(m);
     }
     if let Ok(m) = std::env::var("SUSURRO_MODEL") {
-        return shellexpand(&m);
+        let p = shellexpand(&m);
+        if std::path::Path::new(&p).exists() {
+            return p;
+        }
+    }
+    // First model actually on disk wins; the error names base.en.
+    if let Ok(home) = std::env::var("HOME") {
+        for name in ["small.en.bin", "tiny.en.bin", "base.en.bin"] {
+            let p = std::path::PathBuf::from(&home)
+                .join(".local/share/susurro/models")
+                .join(name);
+            if p.exists() {
+                return p.to_string_lossy().into_owned();
+            }
+        }
     }
     shellexpand("~/.local/share/susurro/models/base.en.bin")
 }

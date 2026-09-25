@@ -6,6 +6,7 @@ type PillState = "idle" | "listening" | "processing" | "done" | "error";
 export default function Pill() {
   const [state, setState] = useState<PillState>("idle");
   const [lastText, setLastText] = useState("");
+  const [errorMsg, setErrorMsg] = useState("");
   const [settleKey, setSettleKey] = useState(0);
   const levels = useRef<number[]>(new Array(48).fill(0));
   const canvasRef = useRef<HTMLCanvasElement>(null);
@@ -23,6 +24,9 @@ export default function Pill() {
       }),
       listen<{ cleaned: string }>("susurro://result", (e) => {
         setLastText(e.payload.cleaned);
+      }),
+      listen<string>("susurro://error", (e) => {
+        setErrorMsg(e.payload);
       }),
     ];
     return () => {
@@ -48,6 +52,11 @@ export default function Pill() {
     });
   }
 
+  // Clear stale errors when a new run starts.
+  useEffect(() => {
+    if (state === "listening") setErrorMsg("");
+  }, [state]);
+
   const label =
     state === "idle"
       ? lastText
@@ -59,13 +68,13 @@ export default function Pill() {
           ? "working"
           : state === "done"
             ? "pasted"
-            : "couldn't paste";
+            : (errorMsg || "couldn't paste").slice(0, 64);
 
   return (
     <div className={`pill${state === "done" ? " settle" : ""}`} key={settleKey}>
       <span className={`dot ${state === "listening" ? "listening" : state === "processing" ? "processing" : ""}`} />
       <canvas ref={canvasRef} width={180} height={28} />
-      <span className="status">
+      <span className={`status${state === "error" ? " error" : ""}`}>
         {state === "done" ? <span className="check">pasted</span> : label}
       </span>
     </div>

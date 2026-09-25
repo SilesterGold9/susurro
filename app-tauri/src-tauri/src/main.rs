@@ -79,12 +79,31 @@ fn shellexpand(p: &str) -> String {
     p.to_string()
 }
 
+fn model_file(name: &str) -> Option<String> {
+    if let Ok(home) = std::env::var("HOME") {
+        let p = PathBuf::from(home).join(".local/share/susurro/models").join(name);
+        if p.exists() {
+            return Some(p.to_string_lossy().into_owned());
+        }
+    }
+    None
+}
+
 fn resolve_whisper(explicit: &str) -> String {
     if !explicit.is_empty() {
         return shellexpand(explicit);
     }
     if let Ok(m) = std::env::var("SUSURRO_MODEL") {
-        return shellexpand(&m);
+        let p = shellexpand(&m);
+        if std::path::Path::new(&p).exists() {
+            return p;
+        }
+    }
+    // First model actually on disk wins; the error names base.en.
+    for name in ["small.en.bin", "tiny.en.bin", "base.en.bin"] {
+        if let Some(p) = model_file(name) {
+            return p;
+        }
     }
     shellexpand("~/.local/share/susurro/models/base.en.bin")
 }
@@ -185,6 +204,48 @@ fn emit_level(app: &AppHandle, v: f32) {
     let _ = app.emit("susurro://level", v);
 }
 
+fn emit_error(app: &AppHandle, msg: &str) {
+    emit_state(app, "error");
+    let _ = app.emit("susurro://error", msg);
+}
+
+/// Show the pill bottom-center on the current monitor.
+fn show_pill(app: &AppHandle) {
+    if let Some(w) = app.get_webview_window("pill") {
+        if let Ok(Some(m)) = w.current_monitor() {
+            let size = m.size();
+            let scale = m.scale_factor();
+            // Window is 364x64 logical; place center-x, ~78% down.
+            let x = (size.width as f64 / scale / 2.0 - 364.0 / 2.0) as i32;
+            let y = (size.height as f64 / scale * 0.78) as i32;
+            let _ = w.set_position(tauri::Position::Physical(
+                tauri::PhysicalPosition {
+                    x: (x as f64 * scale) as i32,
+                    y: (y as f64 * scale) as i32,
+                },
+            ));
+        }
+        let _ = w.show();
+        let _ = w.set_focus();
+    }
+}
+
+/// Replay slice peaks over ~1s so the waveform visibly moves between
+/// chunk recordings (true streaming lands in v0.4.0).
+fn animate_levels(app: AppHandle, chunk: Vec<i16>) {
+    std::thread::spawn(move || {
+        let n = 10;
+        let len = chunk.len();
+        for i in 0..n {
+            let s = len * i / n;
+            let e = len * (i + 1) / n;
+            let peak = susurro_adapters_audio::peak_amplitude(&chunk[s..e]);
+            emit_level(&app, (peak as f32 / 32767.0).clamp(0.0, 1.0));
+            std::thread::sleep(std::time::Duration::from_millis(90));
+        }
+    });
+}
+
 /// Shared dictation run used by the command, tray, and hotkey thread.
 fn run_dictation(
     app: &AppHandle,
@@ -210,10 +271,7 @@ fn run_dictation(
                 let chunk = susurro_adapters_audio::record_pipewire(1, target)
                     .map_err(|e| format!("Couldn't capture audio. Check mic: {e}"))?;
                 let tail = susurro_adapters_audio::trim_transient(&chunk);
-                emit_level(
-                    app,
-                    (susurro_adapters_audio::peak_amplitude(tail) as f32 / 32767.0).clamp(0.0, 1.0),
-                );
+                animate_levels(app.clone(), tail.to_vec());
                 let d = endpoint.push(tail, 1.0);
                 all.extend_from_slice(&chunk);
                 if d == EndpointDecision::EndOfSpeech {
@@ -224,15 +282,12 @@ fn run_dictation(
             let target = (!settings.device.is_empty()).then_some(settings.device.as_str());
             all = susurro_adapters_audio::record_pipewire(settings.seconds.clamp(1, 30), target)
                 .map_err(|e| format!("Couldn't capture audio. Check mic: {e}"))?;
-            let tail = susurro_adapters_audio::trim_transient(&all);
-            emit_level(
-                app,
-                (susurro_adapters_audio::peak_amplitude(tail) as f32 / 32767.0).clamp(0.0, 1.0),
-            );
+            animate_levels(app.clone(), all.clone());
         }
         if all.is_empty() {
-            emit_state(app, "error");
-            return Err("Captured zero samples. Is the mic muted?".into());
+            let msg = "Captured zero samples. Is the mic muted?";
+            emit_error(app, msg);
+            return Err(msg.into());
         }
         all
     };
@@ -259,8 +314,7 @@ fn run_dictation(
         SessionId::generate(),
     )
     .map_err(|e| {
-        emit_state(app, "error");
-        match e {
+        let msg = match e {
             susurro_core::CoreError::Transcription(m) => {
                 format!("Couldn't transcribe. Using local instead? {m}")
             }
@@ -268,7 +322,9 @@ fn run_dictation(
                 format!("Couldn't paste. Is ydotoold running? {m}")
             }
             other => format!("{other}"),
-        }
+        };
+        emit_error(app, &msg);
+        msg
     })?;
 
     let result = UtteranceResult {
@@ -289,9 +345,7 @@ fn start_dictation(
 ) -> Result<UtteranceResult, String> {
     let settings = state.settings.lock().map_err(|e| e.to_string())?.clone();
     let tickets = TicketRegistry::new();
-    if let Some(w) = app.get_webview_window("pill") {
-        let _ = w.show();
-    }
+    show_pill(&app);
     run_dictation(&app, &settings, &tickets)
 }
 
@@ -311,9 +365,7 @@ fn spawn_hotkey_listener(app: AppHandle, state: Arc<AppState>) {
                 std::thread::sleep(std::time::Duration::from_secs(1));
                 continue;
             }
-            if let Some(w) = app.get_webview_window("pill") {
-                let _ = w.show();
-            }
+            show_pill(&app);
             let settings = state
                 .settings
                 .lock()
@@ -336,9 +388,7 @@ fn build_tray(app: &AppHandle) -> Result<(), Box<dyn std::error::Error>> {
         .tooltip("Susurro — talk-to-text")
         .on_menu_event(|app, event| match event.id.as_ref() {
             "dictate" => {
-                if let Some(w) = app.get_webview_window("pill") {
-                    let _ = w.show();
-                }
+                show_pill(app);
                 let handle = app.clone();
                 std::thread::spawn(move || {
                     let state: State<'_, Arc<AppState>> = handle.state();

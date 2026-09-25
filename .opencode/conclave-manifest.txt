@@ -1,0 +1,26 @@
+tree skills/canons
+tree skills/workflow
+tree skills/meta
+tree skills/create-verification-skill
+tree skills/maintain-verification-skill
+file agents/cardinal.md
+file agents/mad-prince.md
+file agents/reviewer-code.md
+file agents/reviewer-judgment.md
+file agents/worker.md
+file commands/tribunal.md
+file commands/duel.md
+file commands/the-file.md
+file commands/case-notes.md
+file commands/the-ledger.md
+file commands/verify.md
+file commands/maintain-verify.md
+file commands/tdd.md
+file commands/constitution.md
+file commands/wizard.md
+file plugin/proof-gate.ts
+file RULES.md
+file lib/wizard-template.sh
+tree ledger
+file bin/conclave
+config opencode.json 2944269714
