@@ -8,6 +8,9 @@ on:
     tags:
       - "v*"
 
+permissions:
+  contents: write
+
 jobs:
   tauri:
     name: tauri app (${{ matrix.os }})
@@ -16,9 +19,9 @@ jobs:
       matrix:
         include:
           - os: ubuntu-22.04
-            args: ""
+            args: "--bundles appimage,deb"
           - os: windows-latest
-            args: ""
+            args: "--bundles nsis"
     runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@v4
