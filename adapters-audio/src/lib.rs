@@ -499,8 +499,30 @@ fn record_via_parecord(seconds: u64) -> Result<Vec<i16>, CoreError> {
 }
 
 fn parse_s16le(bytes: &[u8]) -> Vec<i16> {
-    let (chunks, _) = bytes.as_chunks::<2>();
+    // pw-record wraps stdout in a WAV container: skip to the data chunk.
+    let (chunks, _) = strip_wav_header(bytes).as_chunks::<2>();
     chunks.iter().map(|c| i16::from_le_bytes(*c)).collect()
+}
+
+/// If `bytes` is a WAV file (RIFF....WAVE), return the data-chunk
+/// payload; otherwise return the input unchanged (headerless raw).
+fn strip_wav_header(bytes: &[u8]) -> &[u8] {
+    if bytes.len() < 44 || &bytes[0..4] != b"RIFF" || &bytes[8..12] != b"WAVE" {
+        return bytes;
+    }
+    // Walk subchunks: [id:4][size:u32le][payload...].
+    let mut pos = 12;
+    while pos + 8 <= bytes.len() {
+        let id = &bytes[pos..pos + 4];
+        let size =
+            u32::from_le_bytes(bytes[pos + 4..pos + 8].try_into().unwrap_or([0; 4])) as usize;
+        if id == b"data" {
+            let start = pos + 8;
+            return &bytes[start..bytes.len().min(start + size)];
+        }
+        pos += 8 + size;
+    }
+    bytes
 }
 
 fn resample_f32_to_s16_16k(input: &[f32], src_rate: u32) -> Vec<i16> {
@@ -584,6 +606,22 @@ mod tests {
         assert!(parse_s16le(&[]).is_empty());
         // Odd trailing byte is dropped, not panicking.
         assert_eq!(parse_s16le(&[0x01]), Vec::<i16>::new());
+    }
+
+    #[test]
+    fn parse_skips_wav_header() {
+        // Minimal WAV: RIFF header + fmt chunk + data chunk [1, -2].
+        let mut wav = Vec::new();
+        wav.extend_from_slice(b"RIFF");
+        wav.extend_from_slice(&40u32.to_le_bytes());
+        wav.extend_from_slice(b"WAVE");
+        wav.extend_from_slice(b"fmt ");
+        wav.extend_from_slice(&16u32.to_le_bytes());
+        wav.extend_from_slice(&[0u8; 16]);
+        wav.extend_from_slice(b"data");
+        wav.extend_from_slice(&4u32.to_le_bytes());
+        wav.extend_from_slice(&[0x01, 0x00, 0xFE, 0xFF]);
+        assert_eq!(parse_s16le(&wav), vec![1, -2]);
     }
 
     #[test]
