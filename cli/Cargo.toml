@@ -12,3 +12,7 @@ path = "src/main.rs"
 susurro-core.workspace = true
 clap.workspace = true
 anyhow.workspace = true
+susurro-adapters-audio = { path = "../adapters-audio" }
+susurro-adapters-stt-local = { path = "../adapters-stt-local" }
+susurro-adapters-cleanup = { path = "../adapters-cleanup" }
+susurro-adapters-linux = { path = "../adapters-linux" }

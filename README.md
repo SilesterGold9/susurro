@@ -20,22 +20,45 @@ See `susurro-project-plan.md` for the full plan. This repo starts at **v0.0.1 �
 cargo test
 cargo run -p susurro-cli -- doctor
 cargo run -p susurro-cli -- listen-once
+cargo run -p susurro-cli -- listen --mock --stdout
 cargo run -p susurro-cli -- hyprland-bind
 ```
 
 Set `SUSURRO_MODEL` to your `base.en` model path. Install `wl-clipboard`, `ydotool` (+ `ydotoold` running), `whisper-cli`, `socat` for the real loop.
 
+## v0.0.1 end-to-end (Linux/Hyprland)
+
+1. Download the model:
+   ```sh
+   mkdir -p ~/.local/share/susurro/models
+   # from https://huggingface.co/ggerganov/whisper.cpp — ggml base.en
+   # place as ~/.local/share/susurro/models/base.en.bin
+   # or: export SUSURRO_MODEL=/path/to/base.en.bin
+   ```
+2. Install tools: `wl-clipboard`, `ydotool` (run `ydotoold`), `whisper-cli`, `socat`.
+3. Check: `cargo run -p susurro-cli -- doctor` — mic, tools, and model should read "found".
+4. One-shot real run: `cargo run -p susurro-cli -- listen --seconds 6`
+   Records 6s from the default mic, transcribes with base.en, pastes via wl-copy + ydotool.
+   Use `--stdout` to print instead of pasting, `--mock` to skip hardware.
+5. Hotkey loop:
+   ```sh
+   cargo run -p susurro-cli -- hyprland-bind  # add the bind to hyprland.conf
+   cargo run -p susurro-cli -- daemon
+   ```
+   Press SUPER_SHIFT+R, speak, and the transcript is pasted at the cursor.
+   `cli/tests/e2e_mock.rs` proves the same loop hardware-free in CI.
+
 ## Workspace
 
 - `core/` — state machine, pipeline, port traits. No platform imports.
-- `adapters-audio/` — cpal capture (stub) + mock
+- `adapters-audio/` — cpal 16kHz mono capture + mock
 - `adapters-stt-local/` — whisper.cpp via binary + mock
 - `adapters-stt-cloud/` — stub until v0.3.0
 - `adapters-cleanup/` — passthrough until v0.1.0
 - `adapters-linux/` — Hyprland socket + wl-copy/ydotool paste
 - `adapters-windows/` — stub until v0.6.0
 - `storage/` — in-memory stubs until v0.2.0 SQLite
-- `cli/` — `susurro doctor`, `listen-once`, `hyprland-bind`
+- `cli/` — `susurro doctor`, `listen`, `daemon`, `listen-once`, `hyprland-bind`
 - `app-tauri/` — UI lands in v0.1.0, placeholder only
 - `.github/workflows/` — CI + release skeletons
 
