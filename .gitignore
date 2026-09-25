@@ -3,3 +3,11 @@
 *.sock
 .env
 .DS_Store
+# frontend / tauri
+app-tauri/node_modules/
+app-tauri/dist/
+app-tauri/src-tauri/target/
+*.tauri-key
+.tauri-key
+# whisper models + ollama are user-local
+models/

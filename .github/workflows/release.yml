@@ -1,25 +1,79 @@
 name: release
 
+# First real signed release: v0.1.0. Tag push (v*) builds the Tauri app
+# (AppImage/.deb on Linux; MSI once v0.6.0 lands), signs the updater
+# bundles, publishes latest.json, then attaches the CLI binaries.
 on:
   push:
     tags:
-      - "v*.*.*"
+      - "v*"
 
 jobs:
-  build-release:
-    name: build (${{ matrix.os }})
-    runs-on: ${{ matrix.os }}
+  tauri:
+    name: tauri app (${{ matrix.os }})
     strategy:
       fail-fast: false
       matrix:
-        os: [ubuntu-latest, windows-latest]
+        include:
+          - os: ubuntu-22.04
+            args: ""
+          - os: windows-latest
+            args: ""
+    runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@v4
+      - name: linux deps
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libwebkit2gtk-4.1-dev libappindicator3-dev librsvg2-dev patchelf libasound2-dev pkg-config
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: app-tauri/package-lock.json
+      - name: frontend
+        working-directory: app-tauri
+        run: npm ci && npm run build
+      - uses: tauri-apps/tauri-action@v0
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
+          TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
+        with:
+          tagName: ${{ github.ref_name }}
+          releaseName: "Susurro ${{ github.ref_name }}"
+          releaseBody: "See the milestone changelog on the repo."
+          releaseDraft: false
+          prerelease: ${{ contains(github.ref_name, 'beta') }}
+          projectPath: app-tauri
+          args: ${{ matrix.args }}
+
+  cli:
+    name: cli binaries
+    needs: [tauri]
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-22.04, windows-latest]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+      - name: linux deps
+        if: runner.os == 'Linux'
+        run: sudo apt-get update && sudo apt-get install -y libasound2-dev pkg-config
       - uses: dtolnay/rust-toolchain@stable
       - name: build
         run: cargo build --release -p susurro-cli
-      # v0.1.0+: sign binaries, publish AppImage/.deb + MSI,
-      # generate latest.json updater manifest, GitHub Release.
-      # Skeleton only in v0.0.1 — proves the trigger works.
-      - name: package stub
-        run: echo "release skeleton — real packaging lands in v0.1.0/v0.6.0"
+      - name: upload
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        shell: bash
+        run: |
+          TAG="${{ github.ref_name }}"
+          if [ "${{ runner.os }}" = "Windows" ]; then
+            gh release upload "$TAG" target/release/susurro.exe --clobber
+          else
+            gh release upload "$TAG" target/release/susurro --clobber
+          fi

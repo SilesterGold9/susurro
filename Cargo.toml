@@ -10,6 +10,8 @@ members = [
   "storage",
   "cli",
 ]
+# Tauri app builds standalone (needs GTK/WebKit; CI covers it separately).
+exclude = ["app-tauri/src-tauri"]
 resolver = "2"
 
 [workspace.package]

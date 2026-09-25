@@ -1,0 +1,23 @@
+[package]
+name = "susurro-app"
+version = "0.1.0"
+edition = "2021"
+
+[build-dependencies]
+tauri-build = { version = "2", features = [] }
+
+[dependencies]
+tauri = { version = "2", features = ["tray-icon"] }
+tauri-plugin-updater = "2"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+anyhow = "1"
+susurro-core = { path = "../../core" }
+susurro-adapters-audio = { path = "../../adapters-audio" }
+susurro-adapters-stt-local = { path = "../../adapters-stt-local" }
+susurro-adapters-cleanup = { path = "../../adapters-cleanup" }
+susurro-adapters-linux = { path = "../../adapters-linux" }
+
+[features]
+default = ["custom-protocol"]
+custom-protocol = ["tauri/custom-protocol"]

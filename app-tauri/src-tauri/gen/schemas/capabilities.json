@@ -1,0 +1,1 @@
+{"main-capability":{"identifier":"main-capability","description":"Permissions for Susurro pill and settings windows","local":true,"windows":["pill","settings"],"permissions":["core:default","core:event:allow-listen","core:event:allow-emit","core:event:allow-unlisten","core:window:allow-show","core:window:allow-hide","updater:default"]}}
