@@ -36,6 +36,8 @@ impl SpeechToTextPort for MockStt {
 pub struct WhisperLocal {
     pub model_path: PathBuf,
     pub binary: String,
+    /// Initial prompt for vocabulary boosting (dictionary phrases).
+    pub prompt: Option<String>,
 }
 
 impl WhisperLocal {
@@ -43,7 +45,15 @@ impl WhisperLocal {
         Self {
             model_path,
             binary: "whisper-cli".into(),
+            prompt: None,
         }
+    }
+
+    pub fn with_prompt(mut self, prompt: &str) -> Self {
+        if !prompt.trim().is_empty() {
+            self.prompt = Some(prompt.trim().into());
+        }
+        self
     }
 }
 
@@ -69,16 +79,21 @@ impl SpeechToTextPort for WhisperLocal {
             .map_err(|e| CoreError::Transcription(format!("temp write failed: {e}")))?;
         // NOTE: no --output-txt — that writes a sidecar file and leaves
         // stdout empty. --no-prints + -nt keeps stdout to transcript only.
-        let out = Command::new(&self.binary)
-            .arg("-m")
-            .arg(&self.model_path)
-            .arg("-f")
-            .arg(&tmp)
-            .arg("-l")
-            .arg("en")
-            .arg("--no-prints")
-            .arg("-nt")
-            .output();
+        let out = {
+            let mut cmd = Command::new(&self.binary);
+            cmd.arg("-m")
+                .arg(&self.model_path)
+                .arg("-f")
+                .arg(&tmp)
+                .arg("-l")
+                .arg("en")
+                .arg("--no-prints")
+                .arg("-nt");
+            if let Some(p) = self.prompt.as_deref() {
+                cmd.arg("--prompt").arg(p);
+            }
+            cmd.output()
+        };
         let _ = std::fs::remove_file(&tmp);
         match out {
             Ok(o) if o.status.success() => Ok(Transcript {

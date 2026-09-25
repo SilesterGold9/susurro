@@ -78,6 +78,17 @@ enum Cmd {
         #[arg(long, default_value = "/tmp/susurro.sock")]
         socket: String,
     },
+    /// Show recent transcript history (newest first).
+    History {
+        #[arg(long, default_value_t = 10)]
+        limit: usize,
+    },
+    /// Add a phrase to the custom dictionary (whisper prompt boost).
+    DictAdd { phrase: String },
+    /// Remove a phrase from the custom dictionary.
+    DictRemove { phrase: String },
+    /// List custom dictionary phrases.
+    DictList,
 }
 
 fn main() -> anyhow::Result<()> {
@@ -132,8 +143,13 @@ fn main() -> anyhow::Result<()> {
         Cmd::HyprlandBind { socket } => {
             println!("Add to hyprland.conf:");
             println!("bind = SUPER_SHIFT, R, exec, echo toggle | socat - UNIX-CONNECT:{socket}");
+            println!("(R may be taken, e.g. by wallbash — Shift+D works too.)");
             Ok(())
         }
+        Cmd::History { limit } => show_history(limit),
+        Cmd::DictAdd { phrase } => dict_add(&phrase),
+        Cmd::DictRemove { phrase } => dict_remove(&phrase),
+        Cmd::DictList => dict_list(),
     }
 }
 
@@ -331,6 +347,29 @@ fn listen_real(opts: &ListenOpts) -> anyhow::Result<()> {
 }
 
 fn run_utterance(opts: &ListenOpts, tickets: &TicketRegistry) -> anyhow::Result<()> {
+    let t0 = std::time::Instant::now();
+    let session = SessionId::generate();
+
+    // Persistent exactly-once gate (#16): a replayed session (restart,
+    // double hotkey) is blocked even across process restarts.
+    // Best-effort: a broken db must not block dictation.
+    let db_path = db_path();
+    let persistent_blocked = match susurro_storage::SqliteTickets::open(&db_path) {
+        Ok(store) => match store.claim(&susurro_core::Ticket::new(session, "inject")) {
+            Ok(first) => !first,
+            Err(e) => {
+                eprintln!("ticket store degraded (continuing in-memory): {e}");
+                false
+            }
+        },
+        Err(e) => {
+            eprintln!("ticket store degraded (continuing in-memory): {e}");
+            false
+        }
+    };
+    if persistent_blocked {
+        anyhow::bail!("Duplicate session blocked by persistent ticket.");
+    }
     // Capture: PipeWire on Linux (follows the sound server),
     // cpal elsewhere. --device selects the source.
     // --auto-stop records 1s chunks and ends on VAD end-of-speech
@@ -375,8 +414,11 @@ fn run_utterance(opts: &ListenOpts, tickets: &TicketRegistry) -> anyhow::Result<
         .start()
         .map_err(|e| anyhow::anyhow!("Couldn't start capture: {e}"))?;
 
-    // STT.
+    // STT (dictionary phrases boost whisper via initial prompt, #15).
     let model_path = resolve_model(&opts.model);
+    let dict_prompt = susurro_storage::SqliteDictionary::open(&db_path)
+        .map(|d| d.prompt().unwrap_or_default())
+        .unwrap_or_default();
     let mock_stt;
     let real_stt;
     let stt: &dyn SpeechToTextPort = if opts.mock {
@@ -385,7 +427,8 @@ fn run_utterance(opts: &ListenOpts, tickets: &TicketRegistry) -> anyhow::Result<
         };
         &mock_stt
     } else {
-        real_stt = susurro_adapters_stt_local::WhisperLocal::base_en(model_path.into());
+        real_stt = susurro_adapters_stt_local::WhisperLocal::base_en(model_path.into())
+            .with_prompt(&dict_prompt);
         &real_stt
     };
 
@@ -416,29 +459,104 @@ fn run_utterance(opts: &ListenOpts, tickets: &TicketRegistry) -> anyhow::Result<
         other => anyhow::bail!("Unknown --cleanup '{other}'. Use none, regex, or ollama."),
     };
 
-    let out = Pipeline::run_once(
-        capture.as_mut(),
-        stt,
-        cleanup,
-        inject,
-        tickets,
-        SessionId::generate(),
-    )
-    .map_err(|e| match e {
-        susurro_core::CoreError::Capture(msg) => {
-            anyhow::anyhow!("Couldn't capture audio. Check mic permissions: {msg}")
-        }
-        susurro_core::CoreError::Transcription(msg) => {
-            anyhow::anyhow!("Couldn't transcribe. Using local instead? {msg}")
-        }
-        susurro_core::CoreError::Injection(msg) => {
-            anyhow::anyhow!("Couldn't paste. Is ydotoold running? {msg}")
-        }
-        other => anyhow::anyhow!("{other}"),
-    })?;
+    let out = Pipeline::run_once(capture.as_mut(), stt, cleanup, inject, tickets, session)
+        .map_err(|e| match e {
+            susurro_core::CoreError::Capture(msg) => {
+                anyhow::anyhow!("Couldn't capture audio. Check mic permissions: {msg}")
+            }
+            susurro_core::CoreError::Transcription(msg) => {
+                anyhow::anyhow!("Couldn't transcribe. Using local instead? {msg}")
+            }
+            susurro_core::CoreError::Injection(msg) => {
+                anyhow::anyhow!("Couldn't paste. Is ydotoold running? {msg}")
+            }
+            other => anyhow::anyhow!("{other}"),
+        })?;
     let _ = capture.stop();
     eprintln!("raw: {}", out.raw_text);
     eprintln!("cleaned: {}", out.cleaned_text);
+
+    // History (#14): idempotent upsert, best-effort so a broken db
+    // never blocks dictation.
+    let latency_ms = t0.elapsed().as_millis() as u64;
+    match susurro_storage::SqliteHistory::open(&db_path) {
+        Ok(mut h) => {
+            use susurro_core::ports::HistoryStorePort;
+            let provider = if opts.mock { "mock" } else { "local" };
+            if let Err(e) = h.upsert(susurro_core::ports::HistoryEntry {
+                session,
+                raw_text: out.raw_text.clone(),
+                cleaned_text: Some(out.cleaned_text.clone()),
+                provider: provider.into(),
+                latency_ms,
+            }) {
+                eprintln!("history write degraded: {e}");
+            }
+        }
+        Err(e) => eprintln!("history write degraded: {e}"),
+    }
+    Ok(())
+}
+
+fn db_path() -> std::path::PathBuf {
+    if let Ok(home) = std::env::var("HOME") {
+        std::path::PathBuf::from(home).join(".local/share/susurro/susurro.db")
+    } else {
+        std::path::PathBuf::from("/tmp/susurro.db")
+    }
+}
+
+fn show_history(limit: usize) -> anyhow::Result<()> {
+    let h = susurro_storage::SqliteHistory::open(&db_path())
+        .map_err(|e| anyhow::anyhow!("Couldn't open history: {e}"))?;
+    let entries = h
+        .recent(limit)
+        .map_err(|e| anyhow::anyhow!("Couldn't read history: {e}"))?;
+    if entries.is_empty() {
+        println!("no history yet. Dictate something first.");
+        return Ok(());
+    }
+    for e in entries {
+        let cleaned = e.cleaned_text.as_deref().unwrap_or("");
+        println!(
+            "[{}] {} | {} | {}ms",
+            e.provider, e.raw_text, cleaned, e.latency_ms
+        );
+    }
+    Ok(())
+}
+
+fn dict_add(phrase: &str) -> anyhow::Result<()> {
+    let d = susurro_storage::SqliteDictionary::open(&db_path())
+        .map_err(|e| anyhow::anyhow!("Couldn't open dictionary: {e}"))?;
+    d.add(phrase)
+        .map_err(|e| anyhow::anyhow!("Couldn't add phrase: {e}"))?;
+    println!("added: {}", phrase.trim());
+    Ok(())
+}
+
+fn dict_remove(phrase: &str) -> anyhow::Result<()> {
+    let d = susurro_storage::SqliteDictionary::open(&db_path())
+        .map_err(|e| anyhow::anyhow!("Couldn't open dictionary: {e}"))?;
+    d.remove(phrase)
+        .map_err(|e| anyhow::anyhow!("Couldn't remove phrase: {e}"))?;
+    println!("removed: {}", phrase.trim());
+    Ok(())
+}
+
+fn dict_list() -> anyhow::Result<()> {
+    let d = susurro_storage::SqliteDictionary::open(&db_path())
+        .map_err(|e| anyhow::anyhow!("Couldn't open dictionary: {e}"))?;
+    let phrases = d
+        .list()
+        .map_err(|e| anyhow::anyhow!("Couldn't list dictionary: {e}"))?;
+    if phrases.is_empty() {
+        println!("dictionary empty. Add words whisper mangles: dict-add <phrase>");
+    } else {
+        for p in phrases {
+            println!("- {p}");
+        }
+    }
     Ok(())
 }
 

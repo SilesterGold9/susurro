@@ -194,7 +194,8 @@ fn run_dictation(
     let t0 = std::time::Instant::now();
     emit_state(app, "listening");
 
-    #[cfg(target_os = "linux")]
+    // record_pipewire compiles everywhere and fails actionably where
+    // no sound server tooling exists; no cfg gates needed here.
     let pcm = {
         let mut endpoint = VadEndpoint::default();
         let mut all: Vec<i16> = Vec::new();
@@ -234,11 +235,6 @@ fn run_dictation(
             return Err("Captured zero samples. Is the mic muted?".into());
         }
         all
-    };
-    #[cfg(not(target_os = "linux"))]
-    let pcm: Vec<i16> = {
-        emit_state(app, "error");
-        return Err("Capture is Linux-only until v0.6.0.".into());
     };
 
     emit_state(app, "processing");
@@ -369,11 +365,13 @@ fn build_tray(app: &AppHandle) -> Result<(), Box<dyn std::error::Error>> {
 }
 
 fn dirs_fallback() -> PathBuf {
-    if let Ok(home) = std::env::var("HOME") {
-        PathBuf::from(home).join(".local/share/com.susurro.app")
-    } else {
-        PathBuf::from("/tmp/com.susurro.app")
+    if let Ok(appdata) = std::env::var("APPDATA") {
+        return PathBuf::from(appdata).join("com.susurro.app");
     }
+    if let Ok(home) = std::env::var("HOME") {
+        return PathBuf::from(home).join(".local/share/com.susurro.app");
+    }
+    PathBuf::from("/tmp/com.susurro.app")
 }
 
 fn main() {

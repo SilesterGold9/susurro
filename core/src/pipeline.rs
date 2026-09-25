@@ -68,10 +68,13 @@ pub fn run_once(
     let transcript = stt.transcribe(&pcm)?;
 
     state = state.transition_to(State::Cleanup)?;
-    // Fail-open (v0.2.0 full): if cleanup panics/errs, inject raw.
-    let cleaned = cleanup
-        .cleanup(&transcript.text)
-        .unwrap_or_else(|_| transcript.text.clone());
+    // Fail-open: cleanup errors AND panics fall back to the raw transcript.
+    // Injection must never be blocked by the cleanup stage.
+    let cleaned = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        cleanup.cleanup(&transcript.text)
+    }))
+    .unwrap_or_else(|_| Err(crate::CoreError::Cleanup("cleanup panicked".into())))
+    .unwrap_or_else(|_| transcript.text.clone());
 
     state = state.transition_to(State::Injecting)?;
     let ticket = Ticket::new(session, "inject");
@@ -191,5 +194,36 @@ mod tests {
         .unwrap_err();
         assert!(matches!(err, crate::CoreError::DuplicateEffect(_)));
         assert!(inject.seen.lock().unwrap().is_empty());
+    }
+
+    #[test]
+    fn cleanup_panic_injects_raw() {
+        struct PanicCleanup;
+        impl crate::ports::TextPostProcessorPort for PanicCleanup {
+            fn cleanup(&self, _raw: &str) -> Result<String, crate::CoreError> {
+                panic!("boom");
+            }
+        }
+        let mut cap = MockCapture {
+            chunks: vec![AudioChunk {
+                samples: vec![0; 160],
+                is_final: true,
+            }],
+            i: 0,
+        };
+        let inject = MockInject {
+            seen: Default::default(),
+        };
+        let out = run_once(
+            &mut cap,
+            &MockStt,
+            &PanicCleanup,
+            &inject,
+            &TicketRegistry::new(),
+            SessionId::new(11),
+        )
+        .unwrap();
+        assert_eq!(out.cleaned_text, "hello world");
+        assert_eq!(inject.seen.lock().unwrap().as_slice(), ["hello world"]);
     }
 }
