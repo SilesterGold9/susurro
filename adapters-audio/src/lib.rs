@@ -34,6 +34,25 @@ pub fn peak_amplitude(pcm: &[i16]) -> i32 {
     pcm.iter().map(|s| (*s as i32).abs()).max().unwrap_or(0)
 }
 
+/// Samples to skip at the start of a fresh stream: a newly linked
+/// PipeWire node starts with a loud transient pop, which would
+/// otherwise read as speech in every chunk.
+pub const STARTUP_SKIP_SAMPLES: usize = 2400; // 150ms at 16kHz
+
+/// Peak over the chunk minus the startup transient.
+pub fn peak_amplitude_tail(pcm: &[i16]) -> i32 {
+    peak_amplitude(trim_transient(pcm))
+}
+
+/// Chunk minus the startup transient, for VAD decisions.
+pub fn trim_transient(pcm: &[i16]) -> &[i16] {
+    if pcm.len() > STARTUP_SKIP_SAMPLES {
+        &pcm[STARTUP_SKIP_SAMPLES..]
+    } else {
+        pcm
+    }
+}
+
 /// Energy VAD (v0.1.0): frame-RMS speech detection, zero dependencies.
 /// Good enough for end-of-speech on quiet hardware; a neural VAD
 /// can replace it behind the same port later.
@@ -395,7 +414,7 @@ impl AudioCapturePort for PipeWireCapture {
             return Err(CoreError::Capture("capture not started".into()));
         }
         let pcm = record_via_pipewire(self.seconds, self.target.as_deref())?;
-        let peak = peak_amplitude(&pcm);
+        let peak = peak_amplitude_tail(&pcm);
         if peak < 500 {
             eprintln!(
                 "susurro: captured near-silence (peak {peak}/32767). \
@@ -606,6 +625,18 @@ mod tests {
         assert!(parse_s16le(&[]).is_empty());
         // Odd trailing byte is dropped, not panicking.
         assert_eq!(parse_s16le(&[0x01]), Vec::<i16>::new());
+    }
+
+    #[test]
+    fn tail_peak_ignores_startup_transient() {
+        // Loud pop at stream start, silence after: full peak is loud,
+        // tail peak is silent.
+        let mut pcm = vec![20000, -20000];
+        pcm.extend(vec![0; 16_000]);
+        assert!(peak_amplitude(&pcm) > 500);
+        assert_eq!(peak_amplitude_tail(&pcm), 0);
+        // Short buffers pass through untouched.
+        assert_eq!(trim_transient(&[1, 2, 3]), &[1, 2, 3]);
     }
 
     #[test]

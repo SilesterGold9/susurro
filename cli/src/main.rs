@@ -414,20 +414,23 @@ fn run_utterance(opts: &ListenOpts, tickets: &TicketRegistry) -> anyhow::Result<
 /// on end-of-speech. Chunk-process gaps apply until v0.4.0 streaming.
 #[cfg(target_os = "linux")]
 fn record_with_auto_stop(opts: &ListenOpts) -> anyhow::Result<Vec<i16>> {
-    use susurro_adapters_audio::{peak_amplitude, EndpointDecision, VadEndpoint};
+    use susurro_adapters_audio::{EndpointDecision, VadEndpoint};
     let mut endpoint = VadEndpoint::default();
     let mut pcm_all: Vec<i16> = Vec::new();
     let max_chunks = opts.seconds.clamp(2, 30);
     for i in 0..max_chunks {
         let chunk = susurro_adapters_audio::record_pipewire(1, opts.device.as_deref())
             .map_err(|e| anyhow::anyhow!("Couldn't capture audio. Check mic permissions: {e}"))?;
+        // VAD + peak read the chunk minus the per-stream startup pop;
+        // the full chunk (pop included, whisper ignores it) is kept.
+        let tail = susurro_adapters_audio::trim_transient(&chunk);
         eprintln!(
             "chunk {}/{} peak {}",
             i + 1,
             max_chunks,
-            peak_amplitude(&chunk)
+            susurro_adapters_audio::peak_amplitude(tail)
         );
-        let decision = endpoint.push(&chunk, 1.0);
+        let decision = endpoint.push(tail, 1.0);
         pcm_all.extend_from_slice(&chunk);
         if decision == EndpointDecision::EndOfSpeech {
             eprintln!("end-of-speech detected.");
