@@ -113,9 +113,11 @@ impl TextInjectionPort for LinuxPasteInjector {
                 ));
             }
             // 2. Paste via ydotool (or wtype fallback documented in doctor).
+            // NOTE: ydotool >= 1.0 takes raw keycodes only
+            // (KEY_LEFTCTRL=29, KEY_V=47); names like "ctrl+v" silently no-op.
             if self.use_ydotool {
                 let st = Command::new("ydotool")
-                    .args(["key", "ctrl+v"])
+                    .args(["key", "29:1", "47:1", "47:0", "29:0"])
                     .status()
                     .map_err(|e| {
                         CoreError::Injection(format!(
