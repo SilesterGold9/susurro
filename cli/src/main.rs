@@ -280,22 +280,19 @@ fn run_utterance(opts: &ListenOpts, tickets: &TicketRegistry) -> anyhow::Result<
     };
 
     // Inject.
-    let stdout_inject;
-    let paste_inject;
-    let inject: &dyn susurro_core::ports::TextInjectionPort = if opts.stdout {
-        stdout_inject = StdoutInjector;
-        &stdout_inject
+    #[cfg(target_os = "linux")]
+    let inject_box: Box<dyn susurro_core::ports::TextInjectionPort> = if opts.stdout {
+        Box::new(StdoutInjector)
     } else {
-        #[cfg(target_os = "linux")]
-        {
-            paste_inject = susurro_adapters_linux::LinuxPasteInjector::new();
-            &paste_inject
-        }
-        #[cfg(not(target_os = "linux"))]
-        {
-            anyhow::bail!("Paste injection is Linux-only in v0.0.1. Retry with --stdout.");
-        }
+        Box::new(susurro_adapters_linux::LinuxPasteInjector::new())
     };
+    #[cfg(not(target_os = "linux"))]
+    let inject_box: Box<dyn susurro_core::ports::TextInjectionPort> = if opts.stdout {
+        Box::new(StdoutInjector)
+    } else {
+        anyhow::bail!("Paste injection is Linux-only in v0.0.1. Retry with --stdout.");
+    };
+    let inject: &dyn susurro_core::ports::TextInjectionPort = inject_box.as_ref();
 
     let out = Pipeline::run_once(
         capture.as_mut(),
