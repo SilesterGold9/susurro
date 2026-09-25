@@ -26,7 +26,22 @@ cargo run -p susurro-cli -- hyprland-bind
 
 Set `SUSURRO_MODEL` to your `base.en` model path. Install `wl-clipboard`, `ydotool` (+ `ydotoold` running), `whisper-cli`, `socat` for the real loop.
 
-## v0.0.1 end-to-end (Linux/Hyprland)
+## Install (v0.1.0+)
+
+Prebuilt bundles on the [releases page](https://github.com/SilesterGold9/susurro/releases):
+AppImage / .deb (Linux), NSIS setup (Windows), plus standalone `susurro` CLI binaries.
+
+```sh
+# Linux quick start
+./Susurro_0.1.0_amd64.AppImage
+```
+
+The AppImage needs whisper.cpp (`whisper-cli`), a whisper model, and (for
+paste) `wl-copy` + `ydotool`/`ydotoold` — see `susurro doctor`.
+In-app updates check `latest.json` on the releases page and surface a
+quiet indicator in settings (never a forced modal).
+
+## v0.0.1 end-to-end (Linux/Hyprland, CLI)
 
 1. Download the model:
    ```sh
