@@ -58,9 +58,10 @@ impl OllamaCleanup {
 
     pub fn prompt(raw: &str) -> String {
         format!(
-            "Fix punctuation and capitalization of this speech transcript. \
-            Do not reword, do not add or remove content, do not explain. \
-            Reply with the cleaned transcript only.\nTranscript: {raw}"
+            "You are a transcript punctuator. Fix punctuation and capitalization only. \
+            Changing, adding, removing, or replacing ANY word is forbidden, even if the \
+            sentence sounds odd. Never explain. Output the transcript and nothing else.\n\
+            Transcript: {raw}"
         )
     }
 }
@@ -81,6 +82,7 @@ fn chat_once(endpoint: &str, model: &str, prompt: &str) -> Result<String, String
     let body = serde_json::json!({
         "model": model,
         "stream": false,
+        "options": {"temperature": 0},
         "messages": [{"role": "user", "content": prompt}],
     })
     .to_string();
@@ -147,6 +149,6 @@ mod tests {
     fn prompt_preserves_transcript() {
         let p = OllamaCleanup::prompt("i try to test susura");
         assert!(p.contains("i try to test susura"));
-        assert!(p.contains("Do not reword"));
+        assert!(p.contains("forbidden"));
     }
 }
