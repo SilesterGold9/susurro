@@ -44,10 +44,12 @@ enum Cmd {
         /// push-to-talk-only). Chunk gaps apply until v0.4.0 streaming.
         #[arg(long, default_value_t = false)]
         auto_stop: bool,
-        /// Transcript cleanup: none (v0.0.1 passthrough) or regex
-        /// (v0.1.0 fallback; Ollama lands when the model is downloaded).
+        /// Transcript cleanup: none, regex, or ollama.
         #[arg(long, default_value = "none")]
         cleanup: String,
+        /// Ollama model for --cleanup ollama.
+        #[arg(long, default_value = "qwen2.5:0.5b")]
+        ollama_model: String,
     },
     /// Wait for the Hyprland hotkey, then run Listen in a loop.
     Daemon {
@@ -68,6 +70,8 @@ enum Cmd {
         auto_stop: bool,
         #[arg(long, default_value = "none")]
         cleanup: String,
+        #[arg(long, default_value = "qwen2.5:0.5b")]
+        ollama_model: String,
     },
     /// Print Hyprland bind snippet for the hotkey socket.
     HyprlandBind {
@@ -89,6 +93,7 @@ fn main() -> anyhow::Result<()> {
             device,
             auto_stop,
             cleanup,
+            ollama_model,
         } => listen_real(&ListenOpts {
             seconds,
             model,
@@ -97,6 +102,7 @@ fn main() -> anyhow::Result<()> {
             device,
             auto_stop,
             cleanup,
+            ollama_model,
             mock_text: "hello from susurro".into(),
         }),
         Cmd::Daemon {
@@ -108,6 +114,7 @@ fn main() -> anyhow::Result<()> {
             device,
             auto_stop,
             cleanup,
+            ollama_model,
         } => daemon(
             &socket,
             &ListenOpts {
@@ -118,6 +125,7 @@ fn main() -> anyhow::Result<()> {
                 device,
                 auto_stop,
                 cleanup,
+                ollama_model,
                 mock_text: "hello from susurro".into(),
             },
         ),
@@ -137,6 +145,7 @@ struct ListenOpts {
     device: Option<String>,
     auto_stop: bool,
     cleanup: String,
+    ollama_model: String,
     mock_text: String,
 }
 
@@ -173,6 +182,8 @@ fn doctor() -> anyhow::Result<()> {
         "ydotool",
         "whisper-cli",
         "socat",
+        "ollama",
+        "curl",
     ] {
         let found = which(tool);
         println!(
@@ -195,6 +206,25 @@ fn doctor() -> anyhow::Result<()> {
         }
     );
     println!("socket: /tmp/susurro.sock (Hyprland bind triggers it)");
+    // Best-effort Ollama server + model probe for --cleanup ollama.
+    match std::process::Command::new("curl")
+        .args(["-sS", "-m", "5", "http://localhost:11434/api/tags"])
+        .output()
+    {
+        Ok(o) if o.status.success() => {
+            let body = String::from_utf8_lossy(&o.stdout);
+            println!("ollama server: up");
+            println!(
+                "ollama model qwen2.5:0.5b: {}",
+                if body.contains("qwen2.5:0.5b") {
+                    "pulled"
+                } else {
+                    "missing — ollama pull qwen2.5:0.5b"
+                }
+            );
+        }
+        _ => println!("ollama server: down — --cleanup ollama falls back to regex"),
+    }
     println!("keyring: stub until v0.3.0");
     Ok(())
 }
@@ -374,14 +404,16 @@ fn run_utterance(opts: &ListenOpts, tickets: &TicketRegistry) -> anyhow::Result<
     };
     let inject: &dyn susurro_core::ports::TextInjectionPort = inject_box.as_ref();
 
-    // Cleanup: none (passthrough) or regex fallback.
-    // Ollama cleanup lands once its model is downloaded (issue #9).
+    // Cleanup: none (passthrough), regex fallback, or local Ollama LLM
+    // (fails open to regex when Ollama is down or the model is missing).
     let passthrough = susurro_adapters_cleanup::PassthroughCleanup;
     let regex = susurro_adapters_cleanup::RegexCleanup;
+    let ollama = susurro_adapters_cleanup::OllamaCleanup::new(&opts.ollama_model);
     let cleanup: &dyn susurro_core::ports::TextPostProcessorPort = match opts.cleanup.as_str() {
         "regex" => &regex,
+        "ollama" => &ollama,
         "none" => &passthrough,
-        other => anyhow::bail!("Unknown --cleanup '{other}'. Use none or regex."),
+        other => anyhow::bail!("Unknown --cleanup '{other}'. Use none, regex, or ollama."),
     };
 
     let out = Pipeline::run_once(

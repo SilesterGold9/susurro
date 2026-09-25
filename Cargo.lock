@@ -793,6 +793,7 @@ dependencies = [
 name = "susurro-adapters-cleanup"
 version = "0.0.1"
 dependencies = [
+ "serde_json",
  "susurro-core",
 ]
 
