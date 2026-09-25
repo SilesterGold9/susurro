@@ -19,6 +19,21 @@ pub fn default_input_name() -> Option<String> {
     device.name().ok()
 }
 
+/// All input device names. Used by `susurro doctor` and `--device`.
+pub fn list_input_devices() -> Vec<String> {
+    use cpal::traits::{DeviceTrait, HostTrait};
+    cpal::default_host()
+        .input_devices()
+        .map(|devs| devs.filter_map(|d| d.name().ok()).collect())
+        .unwrap_or_default()
+}
+
+/// Peak absolute amplitude of S16 PCM (0-32767). Values under ~500
+/// mean the mic captured near-silence.
+pub fn peak_amplitude(pcm: &[i16]) -> i32 {
+    pcm.iter().map(|s| (*s as i32).abs()).max().unwrap_or(0)
+}
+
 /// Hardware-free capture for tests and CI.
 pub struct MockCapture {
     chunks: Vec<AudioChunk>,
@@ -75,6 +90,9 @@ impl AudioCapturePort for MockCapture {
 /// no-resample direct path is a v0.4.0 performance item).
 pub struct CpalCapture {
     pub seconds: u64,
+    /// Substring matched against the input device name.
+    /// None = default input device.
+    pub device_name: Option<String>,
     started: bool,
 }
 
@@ -82,6 +100,15 @@ impl CpalCapture {
     pub fn new(seconds: u64) -> Self {
         Self {
             seconds: seconds.clamp(1, 30),
+            device_name: None,
+            started: false,
+        }
+    }
+
+    pub fn with_device(seconds: u64, device_name: &str) -> Self {
+        Self {
+            seconds: seconds.clamp(1, 30),
+            device_name: Some(device_name.into()),
             started: false,
         }
     }
@@ -106,7 +133,15 @@ impl AudioCapturePort for CpalCapture {
         if !self.started {
             return Err(CoreError::Capture("capture not started".into()));
         }
-        let pcm = record_mono_16k(self.seconds)?;
+        let pcm = record_mono_16k(self.seconds, self.device_name.as_deref())?;
+        let peak = peak_amplitude(&pcm);
+        if peak < 500 {
+            eprintln!(
+                "susurro: captured near-silence (peak {peak}/32767). \
+                Speak during the recording window; check mic in pavucontrol \
+                or pick one with `susurro doctor` + --device."
+            );
+        }
         Ok(AudioChunk {
             samples: pcm,
             is_final: true,
@@ -114,16 +149,27 @@ impl AudioCapturePort for CpalCapture {
     }
 }
 
-fn record_mono_16k(seconds: u64) -> Result<Vec<i16>, CoreError> {
+fn record_mono_16k(seconds: u64, device_want: Option<&str>) -> Result<Vec<i16>, CoreError> {
     use cpal::traits::{DeviceTrait, HostTrait, StreamTrait};
     use std::sync::{Arc, Mutex};
 
     let host = cpal::default_host();
-    let device = host.default_input_device().ok_or_else(|| {
-        CoreError::Capture(
-            "No input device found. Check mic permissions and `susurro doctor`.".into(),
-        )
-    })?;
+    let device = match device_want {
+        Some(want) => host
+            .input_devices()
+            .map_err(|e| CoreError::Capture(format!("Couldn't list mics: {e}")))?
+            .find(|d| d.name().is_ok_and(|n| n.contains(want)))
+            .ok_or_else(|| {
+                CoreError::Capture(format!(
+                    "No mic matching '{want}'. See `susurro doctor` for names."
+                ))
+            })?,
+        None => host.default_input_device().ok_or_else(|| {
+            CoreError::Capture(
+                "No input device found. Check mic permissions and `susurro doctor`.".into(),
+            )
+        })?,
+    };
     let supported = device.default_input_config().map_err(|e| {
         CoreError::Capture(format!("Couldn't query mic config. Check permissions: {e}"))
     })?;
@@ -269,5 +315,19 @@ mod tests {
     fn cpal_capture_clamps_duration() {
         assert_eq!(CpalCapture::new(0).seconds, 1);
         assert_eq!(CpalCapture::new(99).seconds, 30);
+    }
+
+    #[test]
+    fn peak_detects_silence() {
+        assert_eq!(peak_amplitude(&[]), 0);
+        assert_eq!(peak_amplitude(&[0, 0, 0]), 0);
+        assert!(peak_amplitude(&[0, 100, -3000, 100]) > 500);
+    }
+
+    #[test]
+    fn with_device_stores_name() {
+        let c = CpalCapture::with_device(6, "front");
+        assert_eq!(c.device_name.as_deref(), Some("front"));
+        assert_eq!(c.seconds, 6);
     }
 }

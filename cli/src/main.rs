@@ -36,6 +36,9 @@ enum Cmd {
         /// Print instead of pasting (useful without ydotool).
         #[arg(long, default_value_t = false)]
         stdout: bool,
+        /// Substring matching the mic device name. Defaults to system default.
+        #[arg(long)]
+        device: Option<String>,
     },
     /// Wait for the Hyprland hotkey, then run Listen in a loop.
     Daemon {
@@ -49,6 +52,9 @@ enum Cmd {
         mock: bool,
         #[arg(long, default_value_t = false)]
         stdout: bool,
+        /// Substring matching the mic device name. Defaults to system default.
+        #[arg(long)]
+        device: Option<String>,
     },
     /// Print Hyprland bind snippet for the hotkey socket.
     HyprlandBind {
@@ -67,11 +73,13 @@ fn main() -> anyhow::Result<()> {
             model,
             mock,
             stdout,
+            device,
         } => listen_real(&ListenOpts {
             seconds,
             model,
             mock,
             stdout,
+            device,
             mock_text: "hello from susurro".into(),
         }),
         Cmd::Daemon {
@@ -80,6 +88,7 @@ fn main() -> anyhow::Result<()> {
             model,
             mock,
             stdout,
+            device,
         } => daemon(
             &socket,
             &ListenOpts {
@@ -87,6 +96,7 @@ fn main() -> anyhow::Result<()> {
                 model,
                 mock,
                 stdout,
+                device,
                 mock_text: "hello from susurro".into(),
             },
         ),
@@ -103,6 +113,7 @@ struct ListenOpts {
     model: Option<String>,
     mock: bool,
     stdout: bool,
+    device: Option<String>,
     mock_text: String,
 }
 
@@ -121,6 +132,16 @@ fn doctor() -> anyhow::Result<()> {
     match susurro_adapters_audio::default_input_name() {
         Some(name) => println!("mic: found ({name})"),
         None => println!("mic: missing — check input device and permissions"),
+    }
+    let devices = susurro_adapters_audio::list_input_devices();
+    if devices.is_empty() {
+        println!("mic devices: none");
+    } else {
+        println!("mic devices:");
+        for d in &devices {
+            println!("  - {d}");
+        }
+        println!("select with: listen --device <name-substring>");
     }
     for tool in ["wl-copy", "ydotool", "whisper-cli", "socat"] {
         let found = which(tool);
@@ -258,6 +279,11 @@ fn run_utterance(opts: &ListenOpts, tickets: &TicketRegistry) -> anyhow::Result<
             text_len: 1600,
             done: false,
         })
+    } else if let Some(dev) = opts.device.as_deref() {
+        Box::new(susurro_adapters_audio::CpalCapture::with_device(
+            opts.seconds,
+            dev,
+        ))
     } else {
         Box::new(susurro_adapters_audio::CpalCapture::new(opts.seconds))
     };
