@@ -33,9 +33,9 @@ impl GlobalHotkeyPort for HyprlandSocket {
     fn wait_for_hotkey(&self) -> Result<HotkeyEvent, CoreError> {
         #[cfg(not(target_os = "linux"))]
         {
-            return Err(CoreError::Config(
+            Err(CoreError::Config(
                 "Hyprland hotkey is Linux-only. This is expected on Windows CI.".into(),
-            ));
+            ))
         }
         #[cfg(target_os = "linux")]
         {
@@ -81,9 +81,9 @@ impl TextInjectionPort for LinuxPasteInjector {
         #[cfg(not(target_os = "linux"))]
         {
             let _ = text;
-            return Err(CoreError::Injection(
+            Err(CoreError::Injection(
                 "Linux paste injection is Linux-only. Expected on Windows CI.".into(),
-            ));
+            ))
         }
         #[cfg(target_os = "linux")]
         {
