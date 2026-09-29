@@ -35,7 +35,7 @@ AppImage / .deb (Linux), NSIS setup (Windows), plus standalone `susurro` CLI bin
 
 ```sh
 # Linux quick start
-./Susurro_0.1.0_amd64.AppImage
+./Susurro_0.3.0_amd64.AppImage
 ```
 
 The AppImage needs whisper.cpp (`whisper-cli`), a whisper model, and (for
