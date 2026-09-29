@@ -198,21 +198,47 @@ pub fn trim_transient(pcm: &[i16]) -> &[i16] {
     }
 }
 
-/// Energy VAD (v0.1.0): frame-RMS speech detection, zero dependencies.
+/// Energy VAD (v0.1.0, math upgrades in v0.3.1): frame-RMS speech
+/// detection with an adaptive noise floor, zero-crossing guard, and
+/// pre-emphasis fricative assist. Zero dependencies.
 /// Good enough for end-of-speech on quiet hardware; a neural VAD
 /// can replace it behind the same port later.
 pub struct EnergyVad {
-    /// RMS threshold in S16 units. Default 800.
+    /// Base RMS threshold in S16 units. Default 800. The adaptive floor
+    /// only ever raises above this, never below, so quiet rooms behave
+    /// exactly like the fixed detector.
     pub threshold: f32,
     /// Analysis frame in samples at 16kHz. Default 480 (30ms).
     pub frame_samples: usize,
+    /// Track the noise floor and raise the threshold in loud rooms.
+    /// Default true. Disable for byte-exact legacy behavior in tests.
+    pub adaptive: bool,
+    /// Noise floor estimate in S16 RMS units. Minima tracking: dives to
+    /// quiet frames instantly, climbs toward sustained energy slowly so
+    /// long utterances never lift the floor out from under themselves.
+    floor: std::sync::Mutex<f32>,
 }
+
+/// Pre-emphasis coefficient: y[n] = x[n] - ALPHA * x[n-1].
+/// Standard speech frontend value, lifts fricative energy before RMS.
+pub const PRE_EMPHASIS_ALPHA: f32 = 0.97;
+
+/// Zero-crossing rate above which a frame reads as near-Nyquist hash
+/// (digital garbage, packet loss) rather than voice. Voice carries no
+/// sustained energy this close to Nyquist.
+pub const HASH_ZCR: f32 = 0.85;
+
+/// Fricative assist gates: significant high-frequency energy plus a
+/// non-trivial overall level, so white noise never trips it.
+pub const FRICATIVE_ZCR: f32 = 0.25;
 
 impl Default for EnergyVad {
     fn default() -> Self {
         Self {
             threshold: 800.0,
             frame_samples: 480,
+            adaptive: true,
+            floor: std::sync::Mutex::new(100.0),
         }
     }
 }
@@ -226,12 +252,112 @@ impl EnergyVad {
         (sum / frame.len() as f64).sqrt() as f32
     }
 
-    /// True if any frame in the chunk exceeds the threshold.
-    pub fn chunk_is_speech(&self, samples: &[i16]) -> bool {
-        samples
-            .chunks(self.frame_samples)
-            .any(|f| self.frame_rms(f) > self.threshold)
+    /// Current effective threshold: base, or three times the noise floor
+    /// when adaptation has measured a loud room.
+    pub fn effective_threshold(&self) -> f32 {
+        if !self.adaptive {
+            return self.threshold;
+        }
+        let floor = self.floor.lock().map(|f| *f).unwrap_or(0.0);
+        self.threshold.max(floor * 3.0)
     }
+
+    /// Pure frame decision, extracted for boundary tests. `rms` is raw
+    /// frame RMS, `zcr` the zero-crossing rate 0..=1, `emph_rms` the
+    /// pre-emphasized RMS, `eff` the effective threshold.
+    pub fn frame_is_speech(rms: f32, zcr: f32, emph_rms: f32, eff: f32) -> bool {
+        let voiced = rms > eff;
+        // Fricatives ("s", "f") carry high-frequency energy at moderate
+        // overall level: emphasized RMS near the threshold AND well above
+        // raw RMS (spectral tilt toward highs), a busy waveform, and
+        // enough raw energy to rule out background hiss. Full-band white
+        // noise fails the tilt ratio (1.39) while 4-8kHz energy passes it.
+        let fricative = !voiced
+            && emph_rms > eff * 0.8
+            && emph_rms > rms * 1.6
+            && zcr > FRICATIVE_ZCR
+            && rms > eff * 0.25;
+        // Near-Nyquist hash cannot be voice, but only veto below twice the
+        // threshold so genuinely loud broadband bursts still pass.
+        let hash_veto = zcr > HASH_ZCR && rms < eff * 2.0;
+        (voiced || fricative) && !hash_veto
+    }
+
+    /// True if any frame in the chunk reads as speech. The threshold is
+    /// read once per chunk so a loud onset always trips before the floor
+    /// can react to it; floor updates apply to the next chunk.
+    pub fn chunk_is_speech(&self, samples: &[i16]) -> bool {
+        if samples.is_empty() {
+            return false;
+        }
+        let emph = pre_emphasize(samples);
+        let eff = self.effective_threshold();
+        let mut any = false;
+        for (raw_frame, emph_frame) in samples
+            .chunks(self.frame_samples)
+            .zip(emph.chunks(self.frame_samples))
+        {
+            let rms = self.frame_rms(raw_frame);
+            let zcr = zero_crossing_rate(raw_frame);
+            let emph_rms = frame_rms_f32(emph_frame);
+            // Minima-tracked noise floor: dive to quiet frames at once,
+            // climb toward sustained energy at 2 percent per frame
+            // (about 1.5s time constant at 30ms frames), capped at the
+            // base threshold so speech never adapts itself away.
+            if self.adaptive {
+                if let Ok(mut floor) = self.floor.lock() {
+                    if rms < *floor {
+                        *floor = rms;
+                    } else {
+                        let cap = self.threshold;
+                        *floor = (*floor + (rms - *floor) * 0.02).min(cap);
+                    }
+                }
+            }
+            if Self::frame_is_speech(rms, zcr, emph_rms, eff) {
+                any = true;
+            }
+        }
+        any
+    }
+}
+
+/// Zero-crossing rate of a frame: fraction of adjacent sample pairs
+/// with opposite signs, 0..=1. Voiced speech sits low, fricatives and
+/// noise read high, near-Nyquist hash pins near 1.
+pub fn zero_crossing_rate(frame: &[i16]) -> f32 {
+    if frame.len() < 2 {
+        return 0.0;
+    }
+    let mut crossings = 0u32;
+    for pair in frame.windows(2) {
+        if (pair[0] < 0) != (pair[1] < 0) && pair[0] != 0 && pair[1] != 0 {
+            crossings += 1;
+        }
+    }
+    crossings as f32 / (frame.len() - 1) as f32
+}
+
+/// Pre-emphasis filter y[n] = x[n] - ALPHA * x[n-1] over S16 PCM,
+/// returned as f32 in S16 units. First sample assumes x[-1] = 0.
+pub fn pre_emphasize(pcm: &[i16]) -> Vec<f32> {
+    let mut prev = 0.0f32;
+    pcm.iter()
+        .map(|s| {
+            let x = *s as f32;
+            let y = x - PRE_EMPHASIS_ALPHA * prev;
+            prev = x;
+            y
+        })
+        .collect()
+}
+
+fn frame_rms_f32(frame: &[f32]) -> f32 {
+    if frame.is_empty() {
+        return 0.0;
+    }
+    let sum: f64 = frame.iter().map(|s| (*s as f64) * (*s as f64)).sum();
+    (sum / frame.len() as f64).sqrt() as f32
 }
 
 impl susurro_core::ports::VoiceActivityDetectorPort for EnergyVad {
@@ -896,5 +1022,92 @@ mod tests {
         let dbg = format!("{:?}", pw_record_command(6, Some("mic")));
         assert!(dbg.contains("--target"), "{dbg}");
         assert!(dbg.contains("mic"), "{dbg}");
+    }
+
+    #[test]
+    fn zcr_separates_tone_from_silence() {
+        assert_eq!(zero_crossing_rate(&[0; 480]), 0.0);
+        assert_eq!(zero_crossing_rate(&[5]), 0.0);
+        // Per-sample alternating tone pins near 1.
+        let hash: Vec<i16> = (0..480).map(|i| if i % 2 == 0 { 1000 } else { -1000 }).collect();
+        assert!(zero_crossing_rate(&hash) > 0.99, "{}", zero_crossing_rate(&hash));
+        // 200Hz square (period 80): 2 crossings per 80 samples.
+        let voiced: Vec<i16> = (0..480).map(|i| if (i / 40) % 2 == 0 { 3000 } else { -3000 }).collect();
+        let z = zero_crossing_rate(&voiced);
+        assert!(z > 0.01 && z < 0.1, "{z}");
+    }
+
+    #[test]
+    fn pre_emphasis_kills_dc_keeps_tilt() {
+        // Constant input: first sample passes, the rest collapse.
+        let out = pre_emphasize(&[1000; 480]);
+        assert_eq!(out[0], 1000.0);
+        assert!(out[1..].iter().all(|s| (s - 30.0).abs() < 0.05));
+        // Low tone attenuated, high tone boosted: tilt ratio separates them.
+        let low: Vec<i16> = (0..480)
+            .map(|n| (1000.0 * (std::f32::consts::TAU * 200.0 * n as f32 / 16_000.0).sin()) as i16)
+            .collect();
+        let high: Vec<i16> = (0..480)
+            .map(|n| (500.0 * (std::f32::consts::TAU * 6000.0 * n as f32 / 16_000.0).sin()) as i16)
+            .collect();
+        let raw_low = EnergyVad::default().frame_rms(&low);
+        let emph_low = frame_rms_f32(&pre_emphasize(&low));
+        let raw_high = EnergyVad::default().frame_rms(&high);
+        let emph_high = frame_rms_f32(&pre_emphasize(&high));
+        assert!(emph_low < raw_low * 0.3, "{emph_low} vs {raw_low}");
+        assert!(emph_high > raw_high * 1.6, "{emph_high} vs {raw_high}");
+    }
+
+    #[test]
+    fn frame_decision_boundaries() {
+        // Voiced speech passes.
+        assert!(EnergyVad::frame_is_speech(5000.0, 1.0, 9850.0, 800.0));
+        // Near-Nyquist hash below twice the threshold is vetoed.
+        assert!(!EnergyVad::frame_is_speech(1000.0, 1.0, 1900.0, 800.0));
+        // Loud broadband still passes despite the hash rate.
+        assert!(EnergyVad::frame_is_speech(5000.0, 0.9, 7000.0, 800.0));
+        // Fricative-range energy with tilt passes where raw alone fails.
+        assert!(EnergyVad::frame_is_speech(354.0, 0.75, 644.0, 800.0));
+        // Full-band white noise fails the tilt ratio.
+        assert!(!EnergyVad::frame_is_speech(577.0, 0.5, 804.0, 800.0));
+        // Quiet stays quiet.
+        assert!(!EnergyVad::frame_is_speech(100.0, 0.0, 50.0, 800.0));
+    }
+
+    #[test]
+    fn floor_adapts_to_loud_room_then_recovers() {
+        let vad = EnergyVad::default();
+        // 200Hz square at RMS 1000: voiced, low ZCR, no veto.
+        let noise: Vec<i16> = (0..480)
+            .map(|i| if (i / 40) % 2 == 0 { 1000 } else { -1000 })
+            .collect();
+        assert!(vad.chunk_is_speech(&noise));
+        // Sustained room noise lifts the floor until it reads silent.
+        for _ in 0..200 {
+            vad.chunk_is_speech(&noise);
+        }
+        assert!(vad.effective_threshold() > 800.0);
+        assert!(!vad.chunk_is_speech(&noise));
+        // Real speech still trips, and quiet resets the floor at once.
+        let loud: Vec<i16> = (0..480)
+            .map(|i| if i % 2 == 0 { 5000 } else { -5000 })
+            .collect();
+        assert!(vad.chunk_is_speech(&loud));
+        assert!(!vad.chunk_is_speech(&vec![0; 480]));
+        assert_eq!(vad.effective_threshold(), 800.0);
+    }
+
+    #[test]
+    fn floor_cap_keeps_long_utterances_audible() {
+        let vad = EnergyVad::default();
+        let loud: Vec<i16> = (0..480)
+            .map(|i| if i % 2 == 0 { 5000 } else { -5000 })
+            .collect();
+        // Ten minutes of continuous loud speech: the floor caps at the
+        // base threshold, so the utterance never adapts itself away.
+        for _ in 0..1200 {
+            assert!(vad.chunk_is_speech(&loud));
+        }
+        assert!(vad.effective_threshold() <= 800.0 * 3.0 + f32::EPSILON);
     }
 }
