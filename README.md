@@ -62,6 +62,10 @@ quiet indicator in settings (never a forced modal).
    ```
    Press SUPER_SHIFT+R, speak, and the transcript is pasted at the cursor.
    `cli/tests/e2e_mock.rs` proves the same loop hardware-free in CI.
+   The `hyprland-bind` output also prints the pill overlay rule block
+   (float, fixed size, bottom-center move, no border, shadow, blur, or
+   focus). The compositor owns placement on Wayland, so the rule block
+   in `windowrules.conf` is what docks the pill, not client positioning.
 
 ## Workspace
 

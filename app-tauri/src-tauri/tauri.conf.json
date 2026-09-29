@@ -17,6 +17,8 @@
         "url": "/",
         "width": 364,
         "height": 64,
+        "center": false,
+        "focus": false,
         "decorations": false,
         "transparent": true,
         "alwaysOnTop": true,

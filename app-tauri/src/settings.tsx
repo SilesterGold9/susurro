@@ -5,6 +5,7 @@ import { check } from "@tauri-apps/plugin-updater";
 export interface Settings {
   seconds: number;
   auto_stop: boolean;
+  sound: boolean;
   cleanup: string;
   ollama_model: string;
   whisper_model: string;
@@ -14,8 +15,9 @@ export interface Settings {
 }
 
 const DEFAULTS: Settings = {
-  seconds: 6,
+  seconds: 30,
   auto_stop: true,
+  sound: true,
   cleanup: "ollama",
   ollama_model: "qwen2.5:0.5b",
   whisper_model: "",
@@ -80,6 +82,14 @@ export default function SettingsView() {
           onChange={(e) => set("auto_stop", e.target.checked)}
         />
         <span>Stop on end-of-speech (VAD)</span>
+      </div>
+      <div className="field row">
+        <input
+          type="checkbox"
+          checked={s.sound}
+          onChange={(e) => set("sound", e.target.checked)}
+        />
+        <span>Sound cues (start, stop, done, error)</span>
       </div>
       <div className="field">
         <label>Cleanup</label>

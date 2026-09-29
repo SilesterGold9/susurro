@@ -16,6 +16,7 @@ use tauri::{AppHandle, Emitter, Manager, State};
 struct Settings {
     seconds: u64,
     auto_stop: bool,
+    sound: bool,
     cleanup: String,
     ollama_model: String,
     whisper_model: String,
@@ -27,8 +28,9 @@ struct Settings {
 impl Default for Settings {
     fn default() -> Self {
         Self {
-            seconds: 6,
+            seconds: 30,
             auto_stop: true,
+            sound: true,
             cleanup: "ollama".into(),
             ollama_model: "qwen2.5:0.5b".into(),
             whisper_model: String::new(),
@@ -210,28 +212,44 @@ fn emit_error(app: &AppHandle, msg: &str) {
 }
 
 /// Show the pill bottom-center on the current monitor.
-fn show_pill(app: &AppHandle) {
+///
+/// The pill never takes focus: stealing focus would yank the caret out of
+/// the app being dictated into so paste lands in the wrong window, and on
+/// Hyprland a focused window also gains an active border. Visibility comes
+/// from always-on-top, not focus. The start cue plays here, at the moment
+/// the pill answers the hotkey.
+fn show_pill(app: &AppHandle, sound: bool) {
     if let Some(w) = app.get_webview_window("pill") {
-        if let Ok(Some(m)) = w.current_monitor() {
-            let size = m.size();
+        // A never-shown window has no monitor yet, so fall back to primary.
+        // Positioning must always run: skipping it leaves placement to the
+        // window manager, which centers new windows.
+        let monitor = w
+            .current_monitor()
+            .ok()
+            .flatten()
+            .or_else(|| w.primary_monitor().ok().flatten());
+        if let Some(m) = monitor {
             let scale = m.scale_factor();
+            let size = m.size().to_logical::<f64>(scale);
             // Window is 364x64 logical; place center-x, ~78% down.
-            let x = (size.width as f64 / scale / 2.0 - 364.0 / 2.0) as i32;
-            let y = (size.height as f64 / scale * 0.78) as i32;
-            let _ = w.set_position(tauri::Position::Physical(
-                tauri::PhysicalPosition {
-                    x: (x as f64 * scale) as i32,
-                    y: (y as f64 * scale) as i32,
-                },
-            ));
+            let x = size.width / 2.0 - 364.0 / 2.0;
+            let y = size.height * 0.78;
+            let _ = w.set_position(tauri::Position::Logical(tauri::LogicalPosition {
+                x,
+                y,
+            }));
+        } else {
+            eprintln!("pill: no monitor found, showing at default position");
         }
         let _ = w.show();
-        let _ = w.set_focus();
+        susurro_adapters_audio::CuePlayer::new(sound).play(susurro_adapters_audio::Cue::Start);
     }
 }
 
 /// Replay slice peaks over ~1s so the waveform visibly moves between
-/// chunk recordings (true streaming lands in v0.4.0).
+/// chunk recordings (true streaming lands in v0.4.0). Four filler ticks
+/// at the noise floor follow the slices so the wave breathes through
+/// inter-chunk gaps instead of freezing mid-peak.
 fn animate_levels(app: AppHandle, chunk: Vec<i16>) {
     std::thread::spawn(move || {
         let n = 10;
@@ -240,10 +258,27 @@ fn animate_levels(app: AppHandle, chunk: Vec<i16>) {
             let s = len * i / n;
             let e = len * (i + 1) / n;
             let peak = susurro_adapters_audio::peak_amplitude(&chunk[s..e]);
-            emit_level(&app, (peak as f32 / 32767.0).clamp(0.0, 1.0));
+            emit_level(&app, susurro_adapters_audio::level_from_peak(peak));
+            std::thread::sleep(std::time::Duration::from_millis(90));
+        }
+        for f in [0.05, 0.03, 0.06, 0.04] {
+            emit_level(&app, f);
             std::thread::sleep(std::time::Duration::from_millis(90));
         }
     });
+}
+
+#[derive(Clone, Serialize)]
+struct ProgressTick {
+    stage: susurro_core::Stage,
+    value: f32,
+}
+
+fn emit_progress(app: &AppHandle, stage: susurro_core::Stage, value: f32) {
+    let _ = app.emit(
+        "susurro://progress",
+        ProgressTick { stage, value },
+    );
 }
 
 /// Shared dictation run used by the command, tray, and hotkey thread.
@@ -254,9 +289,12 @@ fn run_dictation(
 ) -> Result<UtteranceResult, String> {
     let t0 = std::time::Instant::now();
     emit_state(app, "listening");
+    let cues = susurro_adapters_audio::CuePlayer::new(settings.sound);
 
     // record_pipewire compiles everywhere and fails actionably where
     // no sound server tooling exists; no cfg gates needed here.
+    // Only a VAD end plays the stop cue. Cap-timeout stops stay silent
+    // so the two endings feel different.
     let pcm = {
         let mut endpoint = VadEndpoint::default();
         let mut all: Vec<i16> = Vec::new();
@@ -275,6 +313,7 @@ fn run_dictation(
                 let d = endpoint.push(tail, 1.0);
                 all.extend_from_slice(&chunk);
                 if d == EndpointDecision::EndOfSpeech {
+                    cues.play(susurro_adapters_audio::Cue::Stop);
                     break;
                 }
             }
@@ -286,6 +325,7 @@ fn run_dictation(
         }
         if all.is_empty() {
             let msg = "Captured zero samples. Is the mic muted?";
+            cues.play(susurro_adapters_audio::Cue::Error);
             emit_error(app, msg);
             return Err(msg.into());
         }
@@ -304,16 +344,49 @@ fn run_dictation(
         "regex" => &regex,
         _ => &passthrough,
     };
+    // Staged progress ticker: the current stage plus its start time are
+    // shared with a thread that emits susurro://progress every 100ms.
+    // The math lives in core (progress_for): asymptotic per stage, so
+    // the fill stalls but never regresses or finishes early.
+    let stage_now = std::sync::Arc::new(std::sync::Mutex::new((
+        susurro_core::Stage::Transcribing,
+        std::time::Instant::now(),
+    )));
+    let progress_stop = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let progress_thread = {
+        let app = app.clone();
+        let stage_now = stage_now.clone();
+        let progress_stop = progress_stop.clone();
+        std::thread::spawn(move || {
+            while !progress_stop.load(std::sync::atomic::Ordering::Relaxed) {
+                if let Ok(guard) = stage_now.lock() {
+                    let (stage, since) = (guard.0, guard.1);
+                    emit_progress(
+                        &app,
+                        stage,
+                        susurro_core::progress_for(stage, since.elapsed().as_millis() as u64),
+                    );
+                }
+                std::thread::sleep(std::time::Duration::from_millis(100));
+            }
+        })
+    };
     let mut capture = GuiCapture { pcm, done: false };
-    let out = Pipeline::run_once(
+    let out = Pipeline::run_staged(
         &mut capture,
         &stt,
         cleanup,
         &GuiInjector,
         tickets,
         SessionId::generate(),
+        &|stage| {
+            *stage_now.lock().unwrap() = (stage, std::time::Instant::now());
+            emit_progress(app, stage, susurro_core::progress_for(stage, 0));
+        },
     )
     .map_err(|e| {
+        progress_stop.store(true, std::sync::atomic::Ordering::Relaxed);
+        cues.play(susurro_adapters_audio::Cue::Error);
         let msg = match e {
             susurro_core::CoreError::Transcription(m) => {
                 format!("Couldn't transcribe. Using local instead? {m}")
@@ -326,6 +399,9 @@ fn run_dictation(
         emit_error(app, &msg);
         msg
     })?;
+    progress_stop.store(true, std::sync::atomic::Ordering::Relaxed);
+    let _ = progress_thread.join();
+    cues.play(susurro_adapters_audio::Cue::Done);
 
     let result = UtteranceResult {
         raw: out.raw_text,
@@ -345,7 +421,7 @@ fn start_dictation(
 ) -> Result<UtteranceResult, String> {
     let settings = state.settings.lock().map_err(|e| e.to_string())?.clone();
     let tickets = TicketRegistry::new();
-    show_pill(&app);
+    show_pill(&app, settings.sound);
     run_dictation(&app, &settings, &tickets)
 }
 
@@ -365,7 +441,7 @@ fn spawn_hotkey_listener(app: AppHandle, state: Arc<AppState>) {
                 std::thread::sleep(std::time::Duration::from_secs(1));
                 continue;
             }
-            show_pill(&app);
+            show_pill(&app, state.settings.lock().map(|s| s.sound).unwrap_or(true));
             let settings = state
                 .settings
                 .lock()
@@ -388,8 +464,12 @@ fn build_tray(app: &AppHandle) -> Result<(), Box<dyn std::error::Error>> {
         .tooltip("Susurro — talk-to-text")
         .on_menu_event(|app, event| match event.id.as_ref() {
             "dictate" => {
-                show_pill(app);
                 let handle = app.clone();
+                let sound = {
+                    let state: State<'_, Arc<AppState>> = handle.state();
+                    state.settings.lock().map(|s| s.sound).unwrap_or(true)
+                };
+                show_pill(app, sound);
                 std::thread::spawn(move || {
                     let state: State<'_, Arc<AppState>> = handle.state();
                     let settings = state

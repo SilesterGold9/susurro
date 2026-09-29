@@ -22,35 +22,111 @@ html { background: transparent; }
 #root { background: transparent; }
 .wordmark { font-family: Georgia, "Times New Roman", serif; }
 
-/* Floating pill */
+/* Floating pill: the window is exactly 364x64, so the pill is centered
+   in the viewport (symmetric gutters) and its shadow stays small enough
+   to render inside the transparent window instead of clipping at the edge,
+   which reads as a seam. Pill is 340 wide (12px side gutters) and 50 tall
+   (7px top and bottom gutters); the single shadow reaches at most 7px. */
+.pill-wrap {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 100vw;
+  height: 100vh;
+  background: transparent;
+}
 .pill {
   display: flex;
   align-items: center;
   gap: 10px;
+  width: 340px;
+  min-height: 48px;
+  padding: 10px 14px;
   background: var(--surface-dark);
   color: var(--text-dark);
   border-radius: 18px;
-  padding: 10px 14px;
-  width: 340px;
-  box-shadow: 0 8px 28px rgba(0, 0, 0, 0.35);
+  border: 1px solid rgba(255, 255, 255, 0.08);
+  box-shadow: 0 1px 6px rgba(0, 0, 0, 0.35);
   user-select: none;
 }
 @media (prefers-color-scheme: light) {
-  .pill { background: var(--surface-light); color: var(--text-light); }
+  .pill {
+    background: var(--surface-light);
+    color: var(--text-light);
+    border-color: rgba(0, 0, 0, 0.1);
+  }
 }
-.pill .dot { width: 10px; height: 10px; border-radius: 50%; background: #888; flex: none; }
-.pill .dot.listening { background: var(--coral); animation: pulse 1.2s infinite; }
-.pill .dot.processing { background: var(--teal); animation: pulse 0.7s infinite; }
+/* State dot. Exactly one accent per state, everything else neutral.
+   Idle is plain gray. Listening is solid coral with a pulse.
+   Processing is solid teal with a slower breathe. Done is solid teal,
+   static, the settle scale carries the moment. Error is a hollow coral
+   ring, static, deliberately calm. */
+.dot {
+  width: 10px;
+  height: 10px;
+  border-radius: 50%;
+  background: #888;
+  flex: none;
+}
+.state-listening .dot {
+  background: var(--coral);
+  animation: pulse 1.2s ease-in-out infinite;
+}
+.state-processing .dot {
+  background: var(--teal);
+  animation: breathe 2.2s ease-in-out infinite;
+}
+.state-done .dot { background: var(--teal); }
+.state-error .dot {
+  background: transparent;
+  border: 2px solid var(--coral);
+  width: 10px;
+  height: 10px;
+}
 @keyframes pulse { 50% { opacity: 0.35; } }
-.pill canvas { flex: 1; height: 28px; }
-.pill .status { font-size: 12px; opacity: 0.75; min-width: 64px; max-width: 150px; text-align: right; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-.pill .status.error { color: var(--coral); font-size: 11px; }
-.pill.settle { animation: settle 220ms ease-out; }
+@keyframes breathe { 50% { opacity: 0.55; } }
+/* Live waveform zone. Always mounted in every state so the row never
+   reflows: bars, morph, and fill share this box. Fixed slots mean the
+   status label can never slide into the middle. */
+.wave {
+  flex: 1;
+  height: 28px;
+  min-width: 0;
+}
+/* Settle moment: 200ms inside the 150-250ms plan window, scale only,
+   plus a muted teal check. */
+.settle { animation: settle 200ms ease-out; }
 @keyframes settle {
   0% { transform: scale(1.04); }
   100% { transform: scale(1); }
 }
-.pill .check { color: var(--teal); font-weight: bold; }
+.check {
+  color: var(--teal);
+  flex: none;
+  opacity: 0.9;
+}
+.status {
+  font-size: 12px;
+  opacity: 0.75;
+  width: 96px;
+  flex: none;
+  text-align: right;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.status.is-error {
+  color: var(--coral);
+  font-size: 11px;
+  opacity: 1;
+}
+/* Static fallback: no motion anywhere. Canvas shimmer and breathing
+   are already gated in JS; this parks the CSS animations. */
+@media (prefers-reduced-motion: reduce) {
+  .state-listening .dot,
+  .state-processing .dot,
+  .settle { animation: none; }
+}
 
 /* Settings window */
 .settings {

@@ -4,6 +4,9 @@
 //! - `CpalCapture`: real 16kHz mono capture via cpal.
 //!   Records one fixed-duration utterance per `next_chunk`
 //!   (push-to-talk for v0.0.1; VAD streaming lands in v0.1.0/v0.4.0).
+//! - `CuePlayer`: synthesized UI earcons (start, stop, done, error)
+//!   played via paplay/aplay. Zero audio assets, pure sine plus
+//!   click-free envelopes.
 
 use susurro_core::ports::{AudioCapturePort, AudioChunk, SAMPLE_RATE_HZ};
 use susurro_core::CoreError;
@@ -32,6 +35,148 @@ pub fn list_input_devices() -> Vec<String> {
 /// mean the mic captured near-silence.
 pub fn peak_amplitude(pcm: &[i16]) -> i32 {
     pcm.iter().map(|s| (*s as i32).abs()).max().unwrap_or(0)
+}
+
+/// Waveform level for the pill: raw peak over full scale keeps normal
+/// speech under 0.25, so bars barely move. This gates room noise and
+/// expands mid levels with a square-root curve instead.
+pub fn level_from_peak(peak: i32) -> f32 {
+    const GATE: f32 = 500.0;
+    const REF: f32 = 12_000.0;
+    let x = ((peak as f32 - GATE) / (REF - GATE)).clamp(0.0, 1.0);
+    x.sqrt()
+}
+
+/// UI earcon kind. Start fires on hotkey accept, Stop on VAD
+/// end-of-speech only (cap-timeout stops stay silent so the two
+/// endings feel different), Done on injection, Error on failure.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Cue {
+    Start,
+    Stop,
+    Done,
+    Error,
+}
+
+/// Synthesized cue player: pure sine tones with click-free envelopes,
+/// piped to paplay (PipeWire) with an aplay fallback. No audio assets.
+/// Playback runs on a detached thread and never blocks the pipeline;
+/// a missing player is a silent no-op.
+pub struct CuePlayer {
+    pub enabled: bool,
+}
+
+impl CuePlayer {
+    pub fn new(enabled: bool) -> Self {
+        Self { enabled }
+    }
+
+    /// Cue recipe: start Hz, end Hz (glide), milliseconds, peak gain.
+    pub fn spec(cue: Cue) -> (f32, f32, u32, f32) {
+        match cue {
+            Cue::Start => (880.0, 990.0, 120, 0.15),
+            Cue::Stop => (660.0, 520.0, 90, 0.12),
+            Cue::Done => (660.0, 660.0, 90, 0.12),
+            Cue::Error => (220.0, 180.0, 180, 0.12),
+        }
+    }
+
+    /// Done is a pair: 660Hz, 40ms gap, 990Hz.
+    pub fn synth(cue: Cue) -> Vec<i16> {
+        Self::synth_with(cue, 1.0)
+    }
+
+    /// Synthesis with a pitch multiplier for anti-fatigue jitter.
+    /// Tests use `synth` (multiplier 1.0) for exact expectations.
+    pub fn synth_with(cue: Cue, pitch: f32) -> Vec<i16> {
+        match cue {
+            Cue::Done => {
+                let mut out = tone(660.0 * pitch, 660.0 * pitch, 90, 0.12);
+                out.extend(vec![0; ms_samples(40)]);
+                out.extend(tone(990.0 * pitch, 990.0 * pitch, 90, 0.12));
+                out
+            }
+            _ => {
+                let (f0, f1, ms, peak) = Self::spec(cue);
+                tone(f0 * pitch, f1 * pitch, ms, peak)
+            }
+        }
+    }
+
+    pub fn play(&self, cue: Cue) {
+        if !self.enabled {
+            return;
+        }
+        // Plus or minus 2 percent pitch jitter on repeats so frequent
+        // cues never fatigue. Time-derived, no rand dependency.
+        let pitch = 1.0 + ((nanos_now() % 5) as f32 - 2.0) * 0.01;
+        let pcm = Self::synth_with(cue, pitch);
+        std::thread::spawn(move || play_pcm(&pcm));
+    }
+}
+
+/// Milliseconds of 16kHz mono samples for `ms`.
+fn ms_samples(ms: u32) -> usize {
+    (SAMPLE_RATE_HZ as usize * ms as usize) / 1000
+}
+
+/// Sine glide with a click-free envelope: 8ms linear attack from
+/// silence, exponential decay back to near silence. Starts and ends
+/// at zero so back-to-back cues never click.
+fn tone(f0: f32, f1: f32, ms: u32, peak: f32) -> Vec<i16> {
+    let n = ms_samples(ms).max(1);
+    let attack = ms_samples(8).max(1);
+    let mut phase = 0.0f32;
+    (0..n)
+        .map(|i| {
+            let t = i as f32 / n as f32;
+            let freq = f0 + (f1 - f0) * t;
+            phase += std::f32::consts::TAU * freq / SAMPLE_RATE_HZ as f32;
+            let env = if i < attack {
+                i as f32 / attack as f32
+            } else {
+                let k = (i - attack) as f32 / (n - attack).max(1) as f32;
+                (1.0 - k).powi(2)
+            };
+            (phase.sin() * peak * env * i16::MAX as f32) as i16
+        })
+        .collect()
+}
+
+fn nanos_now() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.subsec_nanos() as u64)
+        .unwrap_or(0)
+}
+
+/// Pipe raw s16le mono into paplay, else aplay. Best effort by design.
+fn play_pcm(pcm: &[i16]) {
+    use std::io::Write;
+    let bytes: Vec<u8> = pcm.iter().flat_map(|s| s.to_le_bytes()).collect();
+    for (bin, args) in [
+        (
+            "paplay",
+            vec!["--raw", "--format=s16le", "--rate=16000", "--channels=1"],
+        ),
+        ("aplay", vec!["-r", "16000", "-f", "S16_LE", "-c", "1"]),
+    ] {
+        let mut child = match std::process::Command::new(bin)
+            .args(&args)
+            .stdin(std::process::Stdio::piped())
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .spawn()
+        {
+            Ok(c) => c,
+            Err(_) => continue,
+        };
+        if let Some(mut stdin) = child.stdin.take() {
+            let _ = stdin.write_all(&bytes);
+        }
+        let _ = child.wait();
+        return;
+    }
 }
 
 /// Samples to skip at the start of a fresh stream: a newly linked
@@ -110,7 +255,9 @@ pub enum EndpointDecision {
 /// N continuous silent seconds end the utterance.
 pub struct VadEndpoint {
     pub vad: EnergyVad,
-    /// Silent seconds after speech that end the utterance. Default 1.2.
+    /// Silent seconds after speech that end the utterance. Default 2.0:
+    /// dictation pauses to think run longer than 1s, and a premature end
+    /// cuts the user off mid-thought.
     pub silence_secs: f32,
     heard_speech: bool,
     silent_secs: f32,
@@ -120,7 +267,7 @@ impl Default for VadEndpoint {
     fn default() -> Self {
         Self {
             vad: EnergyVad::default(),
-            silence_secs: 1.2,
+            silence_secs: 2.0,
             heard_speech: false,
             silent_secs: 0.0,
         }
@@ -679,7 +826,7 @@ mod tests {
         assert_eq!(ep.push(&silence, 1.0), EndpointDecision::Continue);
         // Speech resets the silence clock.
         assert_eq!(ep.push(&loud, 1.0), EndpointDecision::Continue);
-        // 1s of silence is not enough (needs 1.2s).
+        // 1s of silence is not enough (needs 2.0s).
         assert_eq!(ep.push(&silence, 1.0), EndpointDecision::Continue);
         // Past the hangover: end.
         assert_eq!(ep.push(&silence, 1.0), EndpointDecision::EndOfSpeech);
@@ -698,6 +845,46 @@ mod tests {
         assert_eq!(ep.push(&loud, 1.0), EndpointDecision::Continue);
         assert_eq!(ep.push(&silence, 1.0), EndpointDecision::Continue);
         assert_eq!(ep.push(&silence, 1.0), EndpointDecision::EndOfSpeech);
+    }
+
+    #[test]
+    fn level_gate_and_curve() {
+        // Room noise stays at zero.
+        assert_eq!(level_from_peak(0), 0.0);
+        assert_eq!(level_from_peak(438), 0.0);
+        // Normal speech reads clearly instead of hugging the floor:
+        // peak 2000 used to show as 0.06, now 0.36.
+        let mid = level_from_peak(2000);
+        assert!(mid > 0.3 && mid < 0.45, "{mid}");
+        // Loud speech saturates near full scale.
+        assert!(level_from_peak(12_000) > 0.99);
+        assert_eq!(level_from_peak(32767), 1.0);
+    }
+
+    #[test]
+    fn cue_lengths_match_specs() {
+        // 16 samples per ms at 16kHz. Done is tone, gap, tone.
+        assert_eq!(CuePlayer::synth(Cue::Start).len(), 16 * 120);
+        assert_eq!(CuePlayer::synth(Cue::Stop).len(), 16 * 90);
+        assert_eq!(CuePlayer::synth(Cue::Done).len(), 16 * (90 + 40 + 90));
+        assert_eq!(CuePlayer::synth(Cue::Error).len(), 16 * 180);
+    }
+
+    #[test]
+    fn cue_envelopes_start_and_end_at_silence() {
+        for cue in [Cue::Start, Cue::Stop, Cue::Done, Cue::Error] {
+            let pcm = CuePlayer::synth(cue);
+            assert_eq!(pcm[0], 0, "{cue:?}");
+            assert!(pcm[pcm.len() - 1].abs() <= 8, "{cue:?}");
+            assert!(pcm.iter().any(|s| s.abs() > 1000), "{cue:?}");
+        }
+    }
+
+    #[test]
+    fn done_cue_has_a_silent_gap() {
+        let pcm = CuePlayer::synth(Cue::Done);
+        let gap = &pcm[16 * 90..16 * 130];
+        assert!(gap.iter().all(|s| *s == 0));
     }
 
     #[test]

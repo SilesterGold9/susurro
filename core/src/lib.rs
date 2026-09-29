@@ -8,9 +8,11 @@ pub mod error;
 pub mod pipeline;
 pub mod ports;
 pub mod session;
+pub mod stages;
 pub mod state;
 
 pub use error::CoreError;
 pub use pipeline::Pipeline;
 pub use session::{SessionId, Ticket, TicketRegistry};
+pub use stages::{progress_for, Stage};
 pub use state::State;
