@@ -467,6 +467,107 @@ impl VadEndpoint {
     }
 }
 
+/// Lock-free single-producer single-consumer ring (v0.4.0, issue 22).
+/// The audio callback pushes without locking or allocating; the pipeline
+/// drains. Power-of-two capacity with mask indexing, head released after
+/// the slot write, tail acquired before the slot read.
+///
+/// Contract: exactly one producer thread and one consumer thread. The
+/// cpal stream thread produces, `next_chunk` consumes. Overflow
+/// overwrites the oldest samples; capacity is sized above the recording
+/// cap so dictation never reaches it.
+pub struct SpscRing<T: Copy + Default> {
+    buf: Box<[std::cell::UnsafeCell<T>]>,
+    mask: usize,
+    head: std::sync::atomic::AtomicUsize,
+    tail: std::sync::atomic::AtomicUsize,
+}
+
+// Sound for single-producer single-consumer use: slots transfer from
+// producer to consumer through Release/Acquire on head, and consumer
+// slots are never touched by the producer after tail passes them.
+unsafe impl<T: Copy + Default + Send> Send for SpscRing<T> {}
+unsafe impl<T: Copy + Default + Send> Sync for SpscRing<T> {}
+
+impl<T: Copy + Default> SpscRing<T> {
+    /// Capacity rounds up to the next power of two, minimum 2.
+    pub fn new(capacity: usize) -> Self {
+        let size = capacity.max(2).next_power_of_two();
+        let mut v = Vec::with_capacity(size);
+        v.resize_with(size, || std::cell::UnsafeCell::new(T::default()));
+        Self {
+            buf: v.into_boxed_slice(),
+            mask: size - 1,
+            head: std::sync::atomic::AtomicUsize::new(0),
+            tail: std::sync::atomic::AtomicUsize::new(0),
+        }
+    }
+
+    pub fn capacity(&self) -> usize {
+        self.mask + 1
+    }
+
+    pub fn len(&self) -> usize {
+        use std::sync::atomic::Ordering::Acquire;
+        self.head
+            .load(Acquire)
+            .wrapping_sub(self.tail.load(Acquire))
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.len() == 0
+    }
+
+    /// Push samples, overwriting the oldest on overflow. Returns the
+    /// count stored, always the full slice unless capacity is zero.
+    pub fn push_slice(&self, samples: &[T]) -> usize {
+        use std::sync::atomic::Ordering::{Acquire, Release};
+        for s in samples {
+            let head = self.head.load(Acquire);
+            // Safety: single producer owns all slots at or ahead of tail
+            // up to head; the consumer never reads past the released head.
+            unsafe {
+                *self.buf[head & self.mask].get() = *s;
+            }
+            let tail = self.tail.load(Acquire);
+            if head.wrapping_sub(tail) >= self.capacity() {
+                self.tail.store(tail.wrapping_add(1), Release);
+            }
+            self.head.store(head.wrapping_add(1), Release);
+        }
+        samples.len()
+    }
+
+    /// Pop up to `out.len()` samples in order. Returns the count read.
+    pub fn pop_slice(&self, out: &mut [T]) -> usize {
+        use std::sync::atomic::Ordering::{Acquire, Release};
+        let mut n = 0;
+        for slot in out.iter_mut() {
+            let tail = self.tail.load(Acquire);
+            let head = self.head.load(Acquire);
+            if tail == head {
+                break;
+            }
+            // Safety: slots below the acquired head were fully written
+            // before the producer released them.
+            unsafe {
+                *slot = *self.buf[tail & self.mask].get();
+            }
+            self.tail.store(tail.wrapping_add(1), Release);
+            n += 1;
+        }
+        n
+    }
+
+    /// Drain everything currently buffered, oldest first.
+    pub fn drain(&self) -> Vec<T> {
+        let mut out = vec![T::default(); self.len()];
+        let n = self.pop_slice(&mut out);
+        out.truncate(n);
+        out
+    }
+}
+
 /// Hardware-free capture for tests and CI.
 pub struct MockCapture {
     chunks: Vec<AudioChunk>,
@@ -518,9 +619,9 @@ impl AudioCapturePort for MockCapture {
 /// one final 16kHz mono S16 chunk.
 ///
 /// Channel handling: multi-channel input is averaged to mono.
-/// Resampling: if the device runs at a rate other than 16kHz, a
-/// linear resample is applied (good enough for v0.0.1; the
-/// no-resample direct path is a v0.4.0 performance item).
+/// Rate handling: 16kHz is requested directly so no resampling runs
+/// on devices that allow it; devices that insist otherwise fall back
+/// to the device default plus the linear resample below.
 pub struct CpalCapture {
     pub seconds: u64,
     /// Substring matched against the input device name.
@@ -582,9 +683,12 @@ impl AudioCapturePort for CpalCapture {
     }
 }
 
+fn capture_err(err: cpal::StreamError) {
+    eprintln!("susurro capture error: {err}");
+}
+
 fn record_mono_16k(seconds: u64, device_want: Option<&str>) -> Result<Vec<i16>, CoreError> {
     use cpal::traits::{DeviceTrait, HostTrait, StreamTrait};
-    use std::sync::{Arc, Mutex};
 
     let host = cpal::default_host();
     let device = match device_want {
@@ -607,73 +711,112 @@ fn record_mono_16k(seconds: u64, device_want: Option<&str>) -> Result<Vec<i16>, 
         CoreError::Capture(format!("Couldn't query mic config. Check permissions: {e}"))
     })?;
 
-    let src_rate = supported.sample_rate().0;
+    let src_default_rate = supported.sample_rate().0;
     let channels = supported.channels() as usize;
     let sample_format = supported.sample_format();
-    // Request a config as close to 16kHz mono as the device allows.
-    // cpal negotiates; we resample below if the device insists otherwise.
-    let mut config: cpal::StreamConfig = supported.into();
-    config.channels = channels.clamp(1, 2) as u16;
+    // Candidate configs: 16kHz mono direct first so no resampling runs
+    // on devices that allow it, then the device default as fallback.
+    // The build attempt decides; an unsupported rate falls through.
+    let base_channels = channels.clamp(1, 2) as u16;
+    let direct = cpal::StreamConfig {
+        channels: base_channels,
+        sample_rate: cpal::SampleRate(SAMPLE_RATE_HZ),
+        buffer_size: cpal::BufferSize::Default,
+    };
+    let mut fallback: cpal::StreamConfig = supported.into();
+    fallback.channels = base_channels;
+    let candidates: Vec<(u32, cpal::StreamConfig)> =
+        vec![(SAMPLE_RATE_HZ, direct), (src_default_rate, fallback)];
 
-    let buf = Arc::new(Mutex::new(Vec::<f32>::new()));
-    let buf_cb = Arc::clone(&buf);
+    let buf = std::sync::Arc::new(SpscRing::<f32>::new(SAMPLE_RATE_HZ as usize * 35));
+    let channels_cb = channels.clamp(1, 2);
 
-    let err_fn = |err| eprintln!("susurro capture error: {err}");
-    let channels_cb = config.channels as usize;
+    let build = |cfg: &cpal::StreamConfig,
+                 ring: &std::sync::Arc<SpscRing<f32>>|
+     -> Result<cpal::Stream, cpal::BuildStreamError> {
+        match sample_format {
+            cpal::SampleFormat::F32 => {
+                let ring = std::sync::Arc::clone(ring);
+                device.build_input_stream(
+                    cfg,
+                    move |data: &[f32], _| {
+                        // Downmix to mono by averaging frames, pushed lock-free.
+                        for frame in data.chunks(channels_cb) {
+                            let m: f32 = frame.iter().sum::<f32>() / frame.len() as f32;
+                            ring.push_slice(&[m]);
+                        }
+                    },
+                    capture_err,
+                    None,
+                )
+            }
+            cpal::SampleFormat::I16 => {
+                let ring = std::sync::Arc::clone(ring);
+                device.build_input_stream(
+                    cfg,
+                    move |data: &[i16], _| {
+                        for frame in data.chunks(channels_cb) {
+                            let m: f32 = frame
+                                .iter()
+                                .map(|s| *s as f32 / i16::MAX as f32)
+                                .sum::<f32>()
+                                / frame.len() as f32;
+                            ring.push_slice(&[m]);
+                        }
+                    },
+                    capture_err,
+                    None,
+                )
+            }
+            cpal::SampleFormat::U16 => {
+                let ring = std::sync::Arc::clone(ring);
+                device.build_input_stream(
+                    cfg,
+                    move |data: &[u16], _| {
+                        for frame in data.chunks(channels_cb) {
+                            let m: f32 = frame
+                                .iter()
+                                .map(|s| {
+                                    (*s as f32 - u16::MAX as f32 / 2.0) / (u16::MAX as f32 / 2.0)
+                                })
+                                .sum::<f32>()
+                                / frame.len() as f32;
+                            ring.push_slice(&[m]);
+                        }
+                    },
+                    capture_err,
+                    None,
+                )
+            }
+            _other => Err(cpal::BuildStreamError::StreamConfigNotSupported),
+        }
+    };
 
-    let stream = match sample_format {
-        cpal::SampleFormat::F32 => device.build_input_stream(
-            &config,
-            move |data: &[f32], _| {
-                let mut b = buf_cb.lock().unwrap();
-                // Downmix to mono by averaging frames.
-                for frame in data.chunks(channels_cb) {
-                    let m: f32 = frame.iter().sum::<f32>() / frame.len() as f32;
-                    b.push(m);
-                }
-            },
-            err_fn,
-            None,
-        ),
-        cpal::SampleFormat::I16 => device.build_input_stream(
-            &config,
-            move |data: &[i16], _| {
-                let mut b = buf_cb.lock().unwrap();
-                for frame in data.chunks(channels_cb) {
-                    let m: f32 = frame
-                        .iter()
-                        .map(|s| *s as f32 / i16::MAX as f32)
-                        .sum::<f32>()
-                        / frame.len() as f32;
-                    b.push(m);
-                }
-            },
-            err_fn,
-            None,
-        ),
-        cpal::SampleFormat::U16 => device.build_input_stream(
-            &config,
-            move |data: &[u16], _| {
-                let mut b = buf_cb.lock().unwrap();
-                for frame in data.chunks(channels_cb) {
-                    let m: f32 = frame
-                        .iter()
-                        .map(|s| (*s as f32 - u16::MAX as f32 / 2.0) / (u16::MAX as f32 / 2.0))
-                        .sum::<f32>()
-                        / frame.len() as f32;
-                    b.push(m);
-                }
-            },
-            err_fn,
-            None,
-        ),
-        other => {
-            return Err(CoreError::Capture(format!(
-                "Unsupported mic sample format {other:?}. Try another input device."
-            )));
+    let mut stream_opt: Option<(u32, cpal::Stream)> = None;
+    let mut last_err = String::new();
+    for (rate, cfg) in &candidates {
+        match build(cfg, &buf) {
+            Ok(stream) => {
+                stream_opt = Some((*rate, stream));
+                break;
+            }
+            Err(cpal::BuildStreamError::StreamConfigNotSupported) if *rate != SAMPLE_RATE_HZ => {
+                last_err = format!("unsupported mic sample format {sample_format:?}");
+            }
+            Err(e) if *rate == SAMPLE_RATE_HZ => {
+                // Direct 16kHz refused; the device default below still tries.
+                last_err = format!("16kHz direct refused ({e}), falling back");
+            }
+            Err(e) => {
+                last_err = format!("couldn't open mic stream: {e}");
+            }
         }
     }
-    .map_err(|e| CoreError::Capture(format!("Couldn't open mic stream: {e}")))?;
+    let (src_rate, stream) = stream_opt
+        .ok_or_else(|| CoreError::Capture(format!("{last_err}. Try another input device.")))?;
+    if src_rate != SAMPLE_RATE_HZ && !last_err.is_empty() {
+        eprintln!("susurro: {last_err}; resampling to 16kHz.");
+    }
 
     stream
         .play()
@@ -681,7 +824,7 @@ fn record_mono_16k(seconds: u64, device_want: Option<&str>) -> Result<Vec<i16>, 
     std::thread::sleep(std::time::Duration::from_secs(seconds));
     drop(stream);
 
-    let mono_f32 = buf.lock().unwrap().clone();
+    let mono_f32 = buf.drain();
     if mono_f32.is_empty() {
         return Err(CoreError::Capture(
             "Captured zero samples. Is the mic muted or busy in another app?".into(),
@@ -1186,5 +1329,57 @@ mod tests {
     fn mic_probe_never_panics() {
         // No tools or no compositor must yield None, never a panic.
         let _ = probe_mic_level();
+    }
+
+    #[test]
+    fn ring_rounds_capacity_to_power_of_two() {
+        assert_eq!(SpscRing::<i16>::new(1000).capacity(), 1024);
+        assert_eq!(SpscRing::<i16>::new(16).capacity(), 16);
+        assert_eq!(SpscRing::<i16>::new(0).capacity(), 2);
+    }
+
+    #[test]
+    fn ring_preserves_order_across_wraparound() {
+        let ring = SpscRing::<i16>::new(8);
+        assert!(ring.is_empty());
+        assert_eq!(ring.push_slice(&[1, 2, 3, 4, 5, 6]), 6);
+        let mut out = [0; 4];
+        assert_eq!(ring.pop_slice(&mut out), 4);
+        assert_eq!(out, [1, 2, 3, 4]);
+        // Wrap past the end of the buffer.
+        assert_eq!(ring.push_slice(&[7, 8, 9, 10, 11, 12]), 6);
+        assert_eq!(ring.drain(), vec![5, 6, 7, 8, 9, 10, 11, 12]);
+        assert!(ring.is_empty());
+        // Empty pop reads nothing.
+        assert_eq!(ring.pop_slice(&mut out), 0);
+    }
+
+    #[test]
+    fn ring_overwrites_oldest_on_overflow() {
+        let ring = SpscRing::<i16>::new(4);
+        ring.push_slice(&[1, 2, 3, 4]);
+        ring.push_slice(&[5, 6]);
+        assert_eq!(ring.len(), 4);
+        assert_eq!(ring.drain(), vec![3, 4, 5, 6]);
+    }
+
+    #[test]
+    fn ring_holds_producer_consumer_threads() {
+        use std::sync::Arc;
+        let ring = Arc::new(SpscRing::<i16>::new(1024));
+        let producer = Arc::clone(&ring);
+        let handle = std::thread::spawn(move || {
+            for chunk in 0..100 {
+                let base = (chunk * 10) as i16;
+                let data: Vec<i16> = (0..10).map(|i| base + i).collect();
+                producer.push_slice(&data);
+            }
+        });
+        handle.join().unwrap();
+        let out = ring.drain();
+        assert_eq!(out.len(), 1000);
+        for (i, s) in out.iter().enumerate() {
+            assert_eq!(*s, i as i16);
+        }
     }
 }
