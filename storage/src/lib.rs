@@ -4,6 +4,9 @@
 //! - `SqliteHistory`: transcript history with idempotent upserts.
 //! - `SqliteTickets`: persistent exactly-once ticket claims.
 //! - `SqliteDictionary`: custom vocabulary list.
+//! - `keys` (v0.3.0): OS keyring for cloud API keys, env fallback.
+
+pub mod keys;
 
 use std::collections::HashMap;
 use susurro_core::ports::{HistoryEntry, HistoryStorePort, SettingsStorePort};

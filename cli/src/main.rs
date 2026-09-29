@@ -97,6 +97,21 @@ enum Cmd {
     DictRemove { phrase: String },
     /// List custom dictionary phrases.
     DictList,
+    /// Store a cloud API key in the OS keyring (groq or nim).
+    /// Reads the secret from stdin so it never lands in shell history.
+    /// Example: echo -n "key" | susurro key-set groq.
+    KeySet {
+        /// Provider name: groq or nim.
+        provider: String,
+        /// Read the secret from this env var instead of stdin (CI use).
+        #[arg(long)]
+        from_env: Option<String>,
+    },
+    /// Delete a cloud API key from the OS keyring (groq or nim).
+    KeyClear {
+        /// Provider name: groq or nim.
+        provider: String,
+    },
 }
 
 fn main() -> anyhow::Result<()> {
@@ -183,6 +198,8 @@ fn main() -> anyhow::Result<()> {
         Cmd::DictAdd { phrase } => dict_add(&phrase),
         Cmd::DictRemove { phrase } => dict_remove(&phrase),
         Cmd::DictList => dict_list(),
+        Cmd::KeySet { provider, from_env } => key_set(&provider, from_env.as_deref()),
+        Cmd::KeyClear { provider } => key_clear(&provider),
     }
 }
 
@@ -221,6 +238,32 @@ fn resolve_model(explicit: &Option<String>) -> String {
         }
     }
     shellexpand("~/.local/share/susurro/models/base.en.bin")
+}
+
+/// Cloud model override from env, else the adapter default.
+fn susurro_groq_model() -> String {
+    std::env::var("SUSURRO_GROQ_MODEL")
+        .ok()
+        .filter(|m| !m.trim().is_empty())
+        .unwrap_or_else(|| susurro_adapters_stt_cloud::GROQ_DEFAULT_MODEL.into())
+}
+
+/// Cloud model override from env, else the adapter default.
+fn susurro_nim_model() -> String {
+    std::env::var("SUSURRO_NIM_MODEL")
+        .ok()
+        .filter(|m| !m.trim().is_empty())
+        .unwrap_or_else(|| susurro_adapters_stt_cloud::NIM_DEFAULT_MODEL.into())
+}
+
+/// Keyring-first config for one cloud provider. None when no key is stored.
+fn cloud_config(
+    provider: susurro_storage::keys::Provider,
+    base_url: &str,
+    model: &str,
+) -> Option<susurro_adapters_stt_cloud::OpenAiCompatibleConfig> {
+    let key = susurro_storage::keys::provider_key(provider).ok()??;
+    susurro_adapters_stt_cloud::OpenAiCompatibleConfig::new(base_url, model, &key).ok()
 }
 
 fn doctor() -> anyhow::Result<()> {
@@ -290,31 +333,49 @@ fn doctor() -> anyhow::Result<()> {
         }
         _ => println!("ollama server: down — --cleanup ollama falls back to regex"),
     }
-    println!("keyring: stub until v0.3.0");
-    // Cloud chain (#19): report key presence without leaking values.
-    // Missing keys skip that provider, chain degrades to local.
+    // Cloud keys (#20): keyring first, env override. Sources named,
+    // values never printed. Missing keys skip that provider.
     println!(
-        "groq key: {}",
-        if std::env::var("GROQ_API_KEY")
-            .map(|k| !k.trim().is_empty())
-            .unwrap_or(false)
-        {
-            "set — chain tries groq, then nim, then local"
+        "keyring backend: {}",
+        if susurro_storage::keys::backend_available() {
+            "ready"
         } else {
-            "missing — groq skipped, chain tries nim, then local"
+            "unavailable — keys fall back to env, install a Secret Service provider for persistence"
         }
     );
-    println!(
-        "nim key: {}",
-        if std::env::var("NVIDIA_NIM_API_KEY")
-            .map(|k| !k.trim().is_empty())
-            .unwrap_or(false)
-        {
-            "set — chain includes nim before local"
-        } else {
-            "missing — nim skipped, chain ends at local"
-        }
-    );
+    for provider in [
+        susurro_storage::keys::Provider::Groq,
+        susurro_storage::keys::Provider::Nim,
+    ] {
+        let name = match provider {
+            susurro_storage::keys::Provider::Groq => "groq",
+            susurro_storage::keys::Provider::Nim => "nim",
+        };
+        let source = susurro_storage::keys::provider_source(provider);
+        println!(
+            "{name} key ({}): {}",
+            source.as_str(),
+            match source {
+                susurro_storage::keys::KeySource::Keyring => "set — chain includes it before local",
+                susurro_storage::keys::KeySource::Env =>
+                    "set via env — chain includes it before local",
+                susurro_storage::keys::KeySource::Missing =>
+                    "missing — provider skipped, chain ends at local",
+            }
+        );
+    }
+    // Network status (#20): offline forces local-only.
+    {
+        use susurro_core::ports::NetworkStatusPort;
+        let net = susurro_adapters_stt_cloud::NetworkStatus::new();
+        println!(
+            "network: {}",
+            match net.status() {
+                susurro_core::ports::NetworkState::Online => "online — chain may use cloud",
+                susurro_core::ports::NetworkState::Offline => "offline — chain stays local",
+            }
+        );
+    }
     Ok(())
 }
 
@@ -500,8 +561,9 @@ fn run_utterance(opts: &ListenOpts, tickets: &TicketRegistry) -> anyhow::Result<
     }
 
     // STT (dictionary phrases boost whisper via initial prompt, #15).
-    // Cloud chain in v0.3.0 (#19): Groq, then NIM, then local guarantee.
-    // Missing keys skip that provider, failures fall back to local.
+    // Cloud chain in v0.3.0 (#19, #20): Groq, then NIM, then local guarantee.
+    // Keys come from the OS keyring first, env as override. Missing keys
+    // skip that provider, failures fall back to local.
     let model_path = resolve_model(&opts.model);
     let dict_prompt = susurro_storage::SqliteDictionary::open(&db_path)
         .map(|d| d.prompt().unwrap_or_default())
@@ -517,8 +579,16 @@ fn run_utterance(opts: &ListenOpts, tickets: &TicketRegistry) -> anyhow::Result<
         chain_ref = None;
         &mock_stt
     } else {
-        let groq_cfg = susurro_adapters_stt_cloud::OpenAiCompatibleConfig::groq_from_env().ok();
-        let nim_cfg = susurro_adapters_stt_cloud::OpenAiCompatibleConfig::nim_from_env().ok();
+        let groq_cfg = cloud_config(
+            susurro_storage::keys::Provider::Groq,
+            susurro_adapters_stt_cloud::GROQ_BASE_URL,
+            &susurro_groq_model(),
+        );
+        let nim_cfg = cloud_config(
+            susurro_storage::keys::Provider::Nim,
+            susurro_adapters_stt_cloud::NIM_BASE_URL,
+            &susurro_nim_model(),
+        );
         if groq_cfg.is_none() && nim_cfg.is_none() {
             real_stt = susurro_adapters_stt_local::WhisperLocal::base_en(model_path.into())
                 .with_prompt(&dict_prompt);
@@ -702,6 +772,40 @@ fn dict_list() -> anyhow::Result<()> {
             println!("- {p}");
         }
     }
+    Ok(())
+}
+
+fn key_set(provider_name: &str, from_env: Option<&str>) -> anyhow::Result<()> {
+    use std::io::Read;
+    let provider = susurro_storage::keys::Provider::parse(provider_name)
+        .map_err(|e| anyhow::anyhow!("{e}"))?;
+    let secret = match from_env {
+        Some(var) => {
+            std::env::var(var).map_err(|_| anyhow::anyhow!("env var {var} is empty or missing"))?
+        }
+        None => {
+            let mut buf = String::new();
+            std::io::stdin()
+                .read_to_string(&mut buf)
+                .map_err(|e| anyhow::anyhow!("Couldn't read secret from stdin: {e}"))?;
+            buf
+        }
+    };
+    if secret.trim().is_empty() {
+        anyhow::bail!("empty key. Pipe a value: echo -n \"key\" | susurro key-set {provider_name}");
+    }
+    susurro_storage::keys::keyring_set(provider.account(), &secret)
+        .map_err(|e| anyhow::anyhow!("Couldn't store key: {e}"))?;
+    println!("stored {provider_name} key in keyring.");
+    Ok(())
+}
+
+fn key_clear(provider_name: &str) -> anyhow::Result<()> {
+    let provider = susurro_storage::keys::Provider::parse(provider_name)
+        .map_err(|e| anyhow::anyhow!("{e}"))?;
+    susurro_storage::keys::keyring_delete(provider.account())
+        .map_err(|e| anyhow::anyhow!("Couldn't clear key: {e}"))?;
+    println!("cleared {provider_name} key from keyring.");
     Ok(())
 }
 
