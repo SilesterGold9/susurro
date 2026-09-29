@@ -97,7 +97,10 @@ impl Breaker {
 /// flapping one recovers fast. Pure and unit tested.
 fn backoff(base: Duration, opens: u32) -> Duration {
     let shift = opens.saturating_sub(1).min(10);
-    let secs = base.as_secs().saturating_mul(1 << shift).min(MAX_COOLDOWN_SECS);
+    let secs = base
+        .as_secs()
+        .saturating_mul(1 << shift)
+        .min(MAX_COOLDOWN_SECS);
     Duration::from_secs(secs.max(1))
 }
 
