@@ -108,6 +108,12 @@ fn norm_words(s: &str) -> Vec<String> {
         .collect()
 }
 
+/// Minimum word F1 for a cleanup to count as punctuation-only.
+/// The old rule (intersection over the longer side at 4/5) is exactly
+/// F1 at 0.8 for equal-length texts; F1 generalizes it to additions
+/// and deletions instead of special-casing length first.
+pub const F1_MINIMUM: f64 = 0.8;
+
 /// True when `cleaned` keeps the words of `raw`: punctuation-only edits
 /// score 1.0, paraphrases collapse toward 0. Punctuation and case never
 /// change the score, so a faithful model always passes and a rewriting
@@ -137,7 +143,18 @@ fn preserves_words(raw: &str, cleaned: &str) -> bool {
             j += 1;
         }
     }
-    hit * 5 >= c.len().max(r.len()) * 4
+    word_f1(hit, c.len(), r_sorted.len()) >= F1_MINIMUM
+}
+
+/// Word F1 from intersection size over cleaned and raw word counts.
+/// Precision punishes added words, recall punishes dropped words.
+pub fn word_f1(hit: usize, cleaned_len: usize, raw_len: usize) -> f64 {
+    if hit == 0 || cleaned_len == 0 || raw_len == 0 {
+        return 0.0;
+    }
+    let precision = hit as f64 / cleaned_len as f64;
+    let recall = hit as f64 / raw_len as f64;
+    2.0 * precision * recall / (precision + recall)
 }
 
 /// Minimal Ollama `/api/chat` call via curl (no HTTP deps in v0.1.0).
@@ -251,5 +268,25 @@ mod tests {
     fn quotes_do_not_trip_the_guard() {
         let out = strip_wrapping_quotes("\"Hello world.\"");
         assert!(preserves_words("hello world", out));
+    }
+
+    #[test]
+    fn f1_scores_precision_and_recall() {
+        assert_eq!(word_f1(2, 2, 2), 1.0);
+        assert_eq!(word_f1(0, 2, 2), 0.0);
+        // Added words hurt precision: 5 kept of 5 with 2 added.
+        assert!(word_f1(5, 7, 5) > F1_MINIMUM);
+        assert!(word_f1(4, 7, 4) < F1_MINIMUM);
+        // Dropped words hurt recall: 3 kept of 6 drops below the bar.
+        assert!(word_f1(3, 3, 6) < F1_MINIMUM);
+    }
+
+    #[test]
+    fn added_sentence_trips_f1() {
+        // Same length-budget edge the old rule also caught, now by F1.
+        assert!(!preserves_words(
+            "buy milk",
+            "Buy milk. Also, call your mother about dinner."
+        ));
     }
 }

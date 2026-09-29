@@ -16,12 +16,17 @@ use susurro_core::CoreError;
 pub const DEFAULT_FAILURE_THRESHOLD: u32 = 3;
 pub const DEFAULT_COOLDOWN_SECS: u64 = 60;
 pub const RATE_LIMIT_COOLDOWN_SECS: u64 = 300;
+/// Ceiling for the exponential backoff: 30 minutes. Past that the
+/// provider is effectively down and local carries the load anyway.
+pub const MAX_COOLDOWN_SECS: u64 = 1800;
 
 #[derive(Debug)]
 struct Breaker {
     failures: u32,
+    opens: u32,
     opened_at: Option<Instant>,
     threshold: u32,
+    base: Duration,
     cooldown: Duration,
     rate_limit_cooldown: Duration,
     rate_limited_until: Option<Instant>,
@@ -29,11 +34,14 @@ struct Breaker {
 
 impl Breaker {
     fn new(threshold: u32, cooldown_secs: u64, rate_limit_secs: u64) -> Self {
+        let base = Duration::from_secs(cooldown_secs.max(5));
         Self {
             failures: 0,
+            opens: 0,
             opened_at: None,
             threshold: threshold.max(1),
-            cooldown: Duration::from_secs(cooldown_secs.max(5)),
+            base,
+            cooldown: base,
             rate_limit_cooldown: Duration::from_secs(rate_limit_secs.max(30)),
             rate_limited_until: None,
         }
@@ -54,7 +62,9 @@ impl Breaker {
 
     fn on_success(&mut self) {
         self.failures = 0;
+        self.opens = 0;
         self.opened_at = None;
+        self.cooldown = self.base;
         // A success clears a stale rate-limit hold only when it has expired.
         if let Some(until) = self.rate_limited_until {
             if Instant::now() >= until {
@@ -66,17 +76,41 @@ impl Breaker {
     fn on_failure(&mut self, rate_limited: bool) {
         let now = Instant::now();
         if rate_limited {
-            self.rate_limited_until = Some(now + self.rate_limit_cooldown);
+            self.rate_limited_until =
+                Some(now + self.rate_limit_cooldown + jitter(self.rate_limit_cooldown));
         }
         self.failures += 1;
         if self.failures >= self.threshold {
+            self.opens += 1;
             self.opened_at = Some(now);
+            self.cooldown = backoff(self.cooldown, self.opens) + jitter(self.cooldown);
         }
     }
 
     fn is_open(&self) -> bool {
         !self.allows_probe()
     }
+}
+
+/// Exponential backoff with a ceiling: each consecutive open doubles the
+/// base cooldown up to 30 minutes, so a dead provider backs off while a
+/// flapping one recovers fast. Pure and unit tested.
+fn backoff(base: Duration, opens: u32) -> Duration {
+    let shift = opens.saturating_sub(1).min(10);
+    let secs = base.as_secs().saturating_mul(1 << shift).min(MAX_COOLDOWN_SECS);
+    Duration::from_secs(secs.max(1))
+}
+
+/// Uniform jitter in [0, span): spreads retries so clients stop
+/// stampeding the provider the instant a cooldown expires.
+/// Time-derived like the cue pitch jitter, no rand dependency.
+fn jitter(span: Duration) -> Duration {
+    let span_nanos = span.as_nanos().max(1);
+    let now_nanos = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.subsec_nanos() as u128)
+        .unwrap_or(0);
+    Duration::from_nanos((now_nanos % span_nanos).min(u64::MAX as u128) as u64)
 }
 
 pub fn is_rate_limited(message: &str) -> bool {
@@ -391,5 +425,38 @@ mod tests {
             chain.provider_names(),
             vec!["groq".to_string(), "local".to_string()]
         );
+    }
+
+    #[test]
+    fn backoff_doubles_to_the_ceiling() {
+        let base = Duration::from_secs(60);
+        assert_eq!(backoff(base, 1), Duration::from_secs(60));
+        assert_eq!(backoff(base, 2), Duration::from_secs(120));
+        assert_eq!(backoff(base, 3), Duration::from_secs(240));
+        assert_eq!(backoff(base, 40), Duration::from_secs(MAX_COOLDOWN_SECS));
+    }
+
+    #[test]
+    fn jitter_stays_inside_its_span() {
+        let span = Duration::from_secs(60);
+        for _ in 0..100 {
+            assert!(jitter(span) < span);
+        }
+        assert_eq!(jitter(Duration::ZERO), Duration::ZERO);
+    }
+
+    #[test]
+    fn consecutive_opens_extend_the_cooldown() {
+        let mut b = Breaker::new(1, 60, 300);
+        b.on_failure(false);
+        let first = b.cooldown;
+        assert!(b.is_open());
+        // A probe failure re-opens with a longer cooldown.
+        b.on_failure(false);
+        assert!(b.cooldown >= first);
+        // Success resets to the configured base.
+        b.on_success();
+        assert_eq!(b.cooldown, Duration::from_secs(60));
+        assert!(!b.is_open());
     }
 }
