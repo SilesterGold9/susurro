@@ -134,6 +134,7 @@ fn run_doctor() -> String {
     for tool in [
         "pw-record",
         "wl-copy",
+        "wtype",
         "ydotool",
         "whisper-cli",
         "socat",

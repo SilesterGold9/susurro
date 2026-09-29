@@ -336,6 +336,7 @@ fn doctor() -> anyhow::Result<()> {
         "pw-record",
         "parecord",
         "wl-copy",
+        "wtype",
         "ydotool",
         "whisper-cli",
         "socat",
@@ -446,6 +447,14 @@ fn doctor() -> anyhow::Result<()> {
     );
     #[cfg(not(target_os = "linux"))]
     println!("focused app: detection is Linux-only");
+    println!(
+        "inject: {}",
+        if which("wtype") {
+            "wtype direct-type (one spawn, clipboard preserved)"
+        } else {
+            "clipboard paste (wl-copy plus ydotool)"
+        }
+    );
     Ok(())
 }
 

@@ -57,9 +57,12 @@ impl GlobalHotkeyPort for HyprlandSocket {
     }
 }
 
-/// Clipboard-paste injection: `wl-copy <text>` then `ydotool key ctrl+v`.
-/// Falls back to stdout logging when tools are missing so
-/// `susurro doctor` can diagnose instead of failing silently.
+/// Injection in one subprocess where possible (v0.4.0, issue 25).
+/// `wtype` types the text directly: one spawn, one Wayland roundtrip,
+/// and the user clipboard survives. Without it, the clipboard path
+/// below runs: `wl-copy <text>` then `ydotool key ctrl+v` in a single
+/// batched key sequence. Copy-only mode (`use_ydotool` false) skips
+/// keystrokes on both paths.
 pub struct LinuxPasteInjector {
     pub use_ydotool: bool,
 }
@@ -76,6 +79,33 @@ impl Default for LinuxPasteInjector {
     }
 }
 
+/// wtype invocation for `text`: `--` ends option parsing so leading
+/// dashes type literally, and argv carries the text with no shell.
+fn wtype_command(text: &str) -> std::process::Command {
+    let mut cmd = std::process::Command::new("wtype");
+    cmd.arg("--").arg(text);
+    cmd
+}
+
+/// Outcome of the wtype attempt: typed, missing (fall back to the
+/// clipboard path), or failed at runtime (error out, never double-paste
+/// by falling back after a tool already ran).
+enum WtypeOutcome {
+    Typed,
+    Missing,
+    Failed(String),
+}
+
+fn try_wtype(text: &str) -> WtypeOutcome {
+    match wtype_command(text).status() {
+        Err(_) => WtypeOutcome::Missing,
+        Ok(status) if status.success() => WtypeOutcome::Typed,
+        Ok(status) => WtypeOutcome::Failed(format!(
+            "wtype exited with {status}. Check compositor virtual-keyboard support."
+        )),
+    }
+}
+
 impl TextInjectionPort for LinuxPasteInjector {
     fn inject(&self, text: &str, _ticket: &Ticket) -> Result<(), CoreError> {
         #[cfg(not(target_os = "linux"))]
@@ -88,6 +118,18 @@ impl TextInjectionPort for LinuxPasteInjector {
         #[cfg(target_os = "linux")]
         {
             use std::process::{Command, Stdio};
+            if text.is_empty() {
+                return Ok(());
+            }
+            if self.use_ydotool {
+                match try_wtype(text) {
+                    WtypeOutcome::Typed => return Ok(()),
+                    WtypeOutcome::Failed(msg) => {
+                        return Err(CoreError::Injection(msg));
+                    }
+                    WtypeOutcome::Missing => {}
+                }
+            }
             // 1. Put text on Wayland clipboard.
             let mut child = Command::new("wl-copy")
                 .stdin(Stdio::piped())
@@ -112,7 +154,7 @@ impl TextInjectionPort for LinuxPasteInjector {
                     "wl-copy failed. Install wl-clipboard, then retry.".into(),
                 ));
             }
-            // 2. Paste via ydotool (or wtype fallback documented in doctor).
+            // 2. Paste via ydotool in one batched key sequence.
             // NOTE: ydotool >= 1.0 takes raw keycodes only
             // (KEY_LEFTCTRL=29, KEY_V=47); names like "ctrl+v" silently no-op.
             if self.use_ydotool {
@@ -211,5 +253,115 @@ mod tests {
     fn focused_app_never_panics() {
         // Missing hyprctl or no compositor must yield None, never a panic.
         let _ = super::focused_app();
+    }
+
+    #[test]
+    fn wtype_command_types_text_without_shell() {
+        let dbg = format!("{:?}", super::wtype_command("hello -- world"));
+        assert!(dbg.contains("wtype"), "{dbg}");
+        assert!(dbg.contains("\"--\""), "{dbg}");
+        assert!(dbg.contains("hello -- world"), "{dbg}");
+    }
+
+    #[test]
+    #[cfg(target_os = "linux")]
+    fn empty_text_injects_nothing() {
+        let injector = super::LinuxPasteInjector::new();
+        let ticket = susurro_core::Ticket::new(susurro_core::SessionId::new(1), "inject");
+        assert!(super::TextInjectionPort::inject(&injector, "", &ticket).is_ok());
+    }
+
+    /// Fake tool bin dir on PATH. Serializes PATH mutation across tests.
+    /// Linux-only: the fakes are shell scripts.
+    #[cfg(target_os = "linux")]
+    mod path_tests {
+        use std::sync::{Mutex, OnceLock};
+
+        fn path_lock() -> &'static Mutex<()> {
+            static LOCK: OnceLock<Mutex<()>> = OnceLock::new();
+            LOCK.get_or_init(|| Mutex::new(()))
+        }
+
+        fn fake_bin(name: &str, body: &str) -> std::path::PathBuf {
+            let dir = std::env::temp_dir().join(format!(
+                "susurro-fakebin-{}",
+                susurro_core::SessionId::generate()
+            ));
+            std::fs::create_dir_all(&dir).unwrap();
+            let path = dir.join(name);
+            std::fs::write(&path, body).unwrap();
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o755)).unwrap();
+            dir
+        }
+
+        fn with_path(dir: &std::path::Path, f: impl FnOnce()) {
+            struct Restore(String);
+            impl Drop for Restore {
+                fn drop(&mut self) {
+                    std::env::set_var("PATH", &self.0);
+                }
+            }
+            let prior = std::env::var("PATH").unwrap_or_default();
+            let _restore = Restore(prior.clone());
+            // Prepend: fakes shadow system tools, system tools (sh, cat)
+            // stay reachable. Assumes no system wtype, true on CI images.
+            std::env::set_var("PATH", format!("{}:{prior}", dir.display()));
+            f();
+        }
+
+        #[test]
+        fn wtype_wins_and_receives_text() {
+            let _guard = path_lock().lock().unwrap();
+            let dir = fake_bin(
+                "wtype",
+                "#!/bin/sh\necho \"$2\" >> \"$WTYPE_LOG\"\nexit 0\n",
+            );
+            let log = dir.join("typed.log");
+            std::env::set_var("WTYPE_LOG", &log);
+            with_path(&dir, || {
+                let injector = super::super::LinuxPasteInjector::new();
+                let ticket = susurro_core::Ticket::new(susurro_core::SessionId::new(2), "inject");
+                super::super::TextInjectionPort::inject(&injector, "hello wtype", &ticket).unwrap();
+            });
+            std::env::remove_var("WTYPE_LOG");
+            assert_eq!(std::fs::read_to_string(&log).unwrap(), "hello wtype\n");
+            let _ = std::fs::remove_dir_all(&dir);
+        }
+
+        #[test]
+        fn missing_wtype_falls_back_to_clipboard() {
+            let _guard = path_lock().lock().unwrap();
+            let dir = fake_bin("wl-copy", "#!/bin/sh\ncat >> \"$PASTE_LOG\"\nexit 0\n");
+            // ydotool fake alongside so the fallback completes.
+            std::fs::write(dir.join("ydotool"), "#!/bin/sh\nexit 0\n").unwrap();
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(dir.join("ydotool"), std::fs::Permissions::from_mode(0o755))
+                .unwrap();
+            let log = dir.join("paste.log");
+            std::env::set_var("PASTE_LOG", &log);
+            with_path(&dir, || {
+                let injector = super::super::LinuxPasteInjector::new();
+                let ticket = susurro_core::Ticket::new(susurro_core::SessionId::new(3), "inject");
+                super::super::TextInjectionPort::inject(&injector, "hello paste", &ticket).unwrap();
+            });
+            std::env::remove_var("PASTE_LOG");
+            assert_eq!(std::fs::read_to_string(&log).unwrap(), "hello paste");
+            let _ = std::fs::remove_dir_all(&dir);
+        }
+
+        #[test]
+        fn failing_wtype_errors_without_fallback() {
+            let _guard = path_lock().lock().unwrap();
+            let dir = fake_bin("wtype", "#!/bin/sh\nexit 3\n");
+            with_path(&dir, || {
+                let injector = super::super::LinuxPasteInjector::new();
+                let ticket = susurro_core::Ticket::new(susurro_core::SessionId::new(4), "inject");
+                let err = super::super::TextInjectionPort::inject(&injector, "hello", &ticket)
+                    .unwrap_err();
+                assert!(err.to_string().contains("wtype"), "{err}");
+            });
+            let _ = std::fs::remove_dir_all(&dir);
+        }
     }
 }
