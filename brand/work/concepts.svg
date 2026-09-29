@@ -1,0 +1,123 @@
+<svg xmlns="http://www.w3.org/2000/svg" xmlns:xlink="http://www.w3.org/1999/xlink" width="1600" height="1074" viewBox="0 0 1600 1074"><defs><filter id="grey"><feColorMatrix type="saturate" values="0"/></filter></defs><rect width="1600" height="1074" fill="#f7f7f4"/><text x="60" y="78" font-family="system-ui,-apple-system,'Segoe UI',Helvetica,Arial,sans-serif" font-size="40" font-weight="700" fill="#161616">Susurro — logo concepts</text><text x="60" y="116" font-family="system-ui,-apple-system,'Segoe UI',Helvetica,Arial,sans-serif" font-size="20" fill="#6b6b6b">Greyscale first; colour comes with the kit. Second row: the versatility proof (tile-free A; app-icon B and C).</text><rect x="60" y="150" width="474.667" height="864" rx="18" fill="#fff" stroke="#e4e4e0" stroke-width="1"/><g filter="url(#grey)"><svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 256 256" x="90" y="190" width="414.667" height="300" preserveAspectRatio="xMidYMid meet">
+  <title>Susurro concept A v2: refined waveform tile, one-colour</title>
+  <rect x="8" y="8" width="240" height="240" rx="56" fill="#000"/>
+  <g fill="#fff">
+    <rect x="48" y="93" width="20" height="62" rx="10"/>
+    <rect x="83" y="68" width="20" height="112" rx="10"/>
+    <rect x="118" y="48" width="20" height="152" rx="10"/>
+    <rect x="153" y="68" width="20" height="112" rx="10"/>
+    <rect x="188" y="93" width="20" height="62" rx="10"/>
+  </g>
+</svg>
+</g><g filter="url(#grey)"><svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 256 256" x="90" y="514" width="414.667" height="210" preserveAspectRatio="xMidYMid meet">
+  <title>Susurro concept A standalone v2: waveform bars without tile</title>
+  <g fill="#000">
+    <rect x="48" y="93" width="20" height="62" rx="10"/>
+    <rect x="83" y="68" width="20" height="112" rx="10"/>
+    <rect x="118" y="48" width="20" height="152" rx="10"/>
+    <rect x="153" y="68" width="20" height="112" rx="10"/>
+    <rect x="188" y="93" width="20" height="62" rx="10"/>
+  </g>
+</svg>
+</g><g filter="url(#grey)"><svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 256 256" x="90" y="750" width="64" height="64" preserveAspectRatio="xMidYMid meet">
+  <title>Susurro concept A v2: refined waveform tile, one-colour</title>
+  <rect x="8" y="8" width="240" height="240" rx="56" fill="#000"/>
+  <g fill="#fff">
+    <rect x="48" y="93" width="20" height="62" rx="10"/>
+    <rect x="83" y="68" width="20" height="112" rx="10"/>
+    <rect x="118" y="48" width="20" height="152" rx="10"/>
+    <rect x="153" y="68" width="20" height="112" rx="10"/>
+    <rect x="188" y="93" width="20" height="62" rx="10"/>
+  </g>
+</svg>
+</g><text x="122" y="834" font-family="system-ui,-apple-system,'Segoe UI',Helvetica,Arial,sans-serif" font-size="12" fill="#8a8a8a" text-anchor="middle">64px</text><g filter="url(#grey)"><svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 256 256" x="180" y="782" width="32" height="32" preserveAspectRatio="xMidYMid meet">
+  <title>Susurro concept A v2: refined waveform tile, one-colour</title>
+  <rect x="8" y="8" width="240" height="240" rx="56" fill="#000"/>
+  <g fill="#fff">
+    <rect x="48" y="93" width="20" height="62" rx="10"/>
+    <rect x="83" y="68" width="20" height="112" rx="10"/>
+    <rect x="118" y="48" width="20" height="152" rx="10"/>
+    <rect x="153" y="68" width="20" height="112" rx="10"/>
+    <rect x="188" y="93" width="20" height="62" rx="10"/>
+  </g>
+</svg>
+</g><text x="196" y="834" font-family="system-ui,-apple-system,'Segoe UI',Helvetica,Arial,sans-serif" font-size="12" fill="#8a8a8a" text-anchor="middle">32px</text><g filter="url(#grey)"><svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 256 256" x="238" y="798" width="16" height="16" preserveAspectRatio="xMidYMid meet">
+  <title>Susurro concept A v2: refined waveform tile, one-colour</title>
+  <rect x="8" y="8" width="240" height="240" rx="56" fill="#000"/>
+  <g fill="#fff">
+    <rect x="48" y="93" width="20" height="62" rx="10"/>
+    <rect x="83" y="68" width="20" height="112" rx="10"/>
+    <rect x="118" y="48" width="20" height="152" rx="10"/>
+    <rect x="153" y="68" width="20" height="112" rx="10"/>
+    <rect x="188" y="93" width="20" height="62" rx="10"/>
+  </g>
+</svg>
+</g><text x="246" y="834" font-family="system-ui,-apple-system,'Segoe UI',Helvetica,Arial,sans-serif" font-size="12" fill="#8a8a8a" text-anchor="middle">16px</text><text x="90.0" y="870" font-family="system-ui,-apple-system,'Segoe UI',Helvetica,Arial,sans-serif" font-size="26" font-weight="700" fill="#161616">A · Tile Waveform</text><text x="90.0" y="904" font-family="system-ui,-apple-system,'Segoe UI',Helvetica,Arial,sans-serif" font-size="19" fill="#555">Your current mark, rebuilt: same idea, real</text><text x="90.0" y="930" font-family="system-ui,-apple-system,'Segoe UI',Helvetica,Arial,sans-serif" font-size="19" fill="#555">craft, one-colour and tile-free versions.</text><rect x="562.667" y="150" width="474.667" height="864" rx="18" fill="#fff" stroke="#e4e4e0" stroke-width="1"/><g filter="url(#grey)"><svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 256 256" x="592.667" y="190" width="414.667" height="300" preserveAspectRatio="xMidYMid meet">
+  <title>Susurro concept B v3: whisper S, softened top terminal</title>
+  <path d="M 170 88 C 164 70 148 59 126 59 C 100 59 84 72 84 92 C 84 112 104 121 128 125 C 152 129 172 137 172 161 C 172 186 150 197 128 197 C 107 197 91 188 89 171"
+    fill="none" stroke="#000" stroke-width="30" stroke-linecap="round" stroke-linejoin="round"/>
+</svg>
+</g><g filter="url(#grey)"><svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 256 256" x="592.667" y="514" width="414.667" height="210" preserveAspectRatio="xMidYMid meet">
+  <title>Susurro concept B in tile v3: whisper S as app icon</title>
+  <rect x="8" y="8" width="240" height="240" rx="56" fill="#000"/>
+  <g transform="translate(128,128) scale(0.9) translate(-128,-128)">
+    <path d="M 170 88 C 164 70 148 59 126 59 C 100 59 84 72 84 92 C 84 112 104 121 128 125 C 152 129 172 137 172 161 C 172 186 150 197 128 197 C 107 197 91 188 89 171"
+      fill="none" stroke="#fff" stroke-width="30" stroke-linecap="round" stroke-linejoin="round"/>
+  </g>
+</svg>
+</g><g filter="url(#grey)"><svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 256 256" x="592.667" y="750" width="64" height="64" preserveAspectRatio="xMidYMid meet">
+  <title>Susurro concept B v3: whisper S, softened top terminal</title>
+  <path d="M 170 88 C 164 70 148 59 126 59 C 100 59 84 72 84 92 C 84 112 104 121 128 125 C 152 129 172 137 172 161 C 172 186 150 197 128 197 C 107 197 91 188 89 171"
+    fill="none" stroke="#000" stroke-width="30" stroke-linecap="round" stroke-linejoin="round"/>
+</svg>
+</g><text x="624.667" y="834" font-family="system-ui,-apple-system,'Segoe UI',Helvetica,Arial,sans-serif" font-size="12" fill="#8a8a8a" text-anchor="middle">64px</text><g filter="url(#grey)"><svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 256 256" x="682.667" y="782" width="32" height="32" preserveAspectRatio="xMidYMid meet">
+  <title>Susurro concept B v3: whisper S, softened top terminal</title>
+  <path d="M 170 88 C 164 70 148 59 126 59 C 100 59 84 72 84 92 C 84 112 104 121 128 125 C 152 129 172 137 172 161 C 172 186 150 197 128 197 C 107 197 91 188 89 171"
+    fill="none" stroke="#000" stroke-width="30" stroke-linecap="round" stroke-linejoin="round"/>
+</svg>
+</g><text x="698.667" y="834" font-family="system-ui,-apple-system,'Segoe UI',Helvetica,Arial,sans-serif" font-size="12" fill="#8a8a8a" text-anchor="middle">32px</text><g filter="url(#grey)"><svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 256 256" x="740.667" y="798" width="16" height="16" preserveAspectRatio="xMidYMid meet">
+  <title>Susurro concept B v3: whisper S, softened top terminal</title>
+  <path d="M 170 88 C 164 70 148 59 126 59 C 100 59 84 72 84 92 C 84 112 104 121 128 125 C 152 129 172 137 172 161 C 172 186 150 197 128 197 C 107 197 91 188 89 171"
+    fill="none" stroke="#000" stroke-width="30" stroke-linecap="round" stroke-linejoin="round"/>
+</svg>
+</g><text x="748.667" y="834" font-family="system-ui,-apple-system,'Segoe UI',Helvetica,Arial,sans-serif" font-size="12" fill="#8a8a8a" text-anchor="middle">16px</text><text x="592.6666666666667" y="870" font-family="system-ui,-apple-system,'Segoe UI',Helvetica,Arial,sans-serif" font-size="26" font-weight="700" fill="#161616">B · Whisper S</text><text x="592.6666666666667" y="904" font-family="system-ui,-apple-system,'Segoe UI',Helvetica,Arial,sans-serif" font-size="19" fill="#555">The initial as a single even-weight breath:</text><text x="592.6666666666667" y="930" font-family="system-ui,-apple-system,'Segoe UI',Helvetica,Arial,sans-serif" font-size="19" fill="#555">round, quiet, confident.</text><rect x="1065.33" y="150" width="474.667" height="864" rx="18" fill="#fff" stroke="#161616" stroke-width="2"/><g filter="url(#grey)"><svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 256 256" x="1095.33" y="190" width="414.667" height="300" preserveAspectRatio="xMidYMid meet">
+  <title>Susurro concept C v3: dictation comma, longer tail, recentered</title>
+  <g transform="translate(109,130) scale(1.22) translate(-140,-130)">
+    <circle cx="154" cy="98" r="30" fill="#000"/>
+    <path d="M 138 116 C 114 142 100 170 94 206" fill="none" stroke="#000" stroke-width="30" stroke-linecap="round"/>
+  </g>
+</svg>
+</g><g filter="url(#grey)"><svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 256 256" x="1095.33" y="514" width="414.667" height="210" preserveAspectRatio="xMidYMid meet">
+  <title>Susurro concept C in tile v3: dictation comma as app icon</title>
+  <rect x="8" y="8" width="240" height="240" rx="56" fill="#000"/>
+  <g transform="translate(0,-10)">
+    <g transform="translate(128,128) scale(0.9) translate(-128,-128)">
+      <g transform="translate(109,130) scale(1.22) translate(-140,-130)">
+        <circle cx="154" cy="98" r="30" fill="#fff"/>
+        <path d="M 138 116 C 114 142 100 170 94 206" fill="none" stroke="#fff" stroke-width="30" stroke-linecap="round"/>
+      </g>
+    </g>
+  </g>
+</svg>
+</g><g filter="url(#grey)"><svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 256 256" x="1095.33" y="750" width="64" height="64" preserveAspectRatio="xMidYMid meet">
+  <title>Susurro concept C v3: dictation comma, longer tail, recentered</title>
+  <g transform="translate(109,130) scale(1.22) translate(-140,-130)">
+    <circle cx="154" cy="98" r="30" fill="#000"/>
+    <path d="M 138 116 C 114 142 100 170 94 206" fill="none" stroke="#000" stroke-width="30" stroke-linecap="round"/>
+  </g>
+</svg>
+</g><text x="1127.33" y="834" font-family="system-ui,-apple-system,'Segoe UI',Helvetica,Arial,sans-serif" font-size="12" fill="#8a8a8a" text-anchor="middle">64px</text><g filter="url(#grey)"><svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 256 256" x="1185.33" y="782" width="32" height="32" preserveAspectRatio="xMidYMid meet">
+  <title>Susurro concept C v3: dictation comma, longer tail, recentered</title>
+  <g transform="translate(109,130) scale(1.22) translate(-140,-130)">
+    <circle cx="154" cy="98" r="30" fill="#000"/>
+    <path d="M 138 116 C 114 142 100 170 94 206" fill="none" stroke="#000" stroke-width="30" stroke-linecap="round"/>
+  </g>
+</svg>
+</g><text x="1201.33" y="834" font-family="system-ui,-apple-system,'Segoe UI',Helvetica,Arial,sans-serif" font-size="12" fill="#8a8a8a" text-anchor="middle">32px</text><g filter="url(#grey)"><svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 256 256" x="1243.33" y="798" width="16" height="16" preserveAspectRatio="xMidYMid meet">
+  <title>Susurro concept C v3: dictation comma, longer tail, recentered</title>
+  <g transform="translate(109,130) scale(1.22) translate(-140,-130)">
+    <circle cx="154" cy="98" r="30" fill="#000"/>
+    <path d="M 138 116 C 114 142 100 170 94 206" fill="none" stroke="#000" stroke-width="30" stroke-linecap="round"/>
+  </g>
+</svg>
+</g><text x="1251.33" y="834" font-family="system-ui,-apple-system,'Segoe UI',Helvetica,Arial,sans-serif" font-size="12" fill="#8a8a8a" text-anchor="middle">16px</text><text x="1095.3333333333335" y="870" font-family="system-ui,-apple-system,'Segoe UI',Helvetica,Arial,sans-serif" font-size="26" font-weight="700" fill="#161616">C · Dictation Comma</text><text x="1095.3333333333335" y="898" font-family="system-ui,-apple-system,'Segoe UI',Helvetica,Arial,sans-serif" font-size="15" font-weight="700" fill="#161616" letter-spacing="1.5">RECOMMENDED</text><text x="1095.3333333333335" y="932" font-family="system-ui,-apple-system,'Segoe UI',Helvetica,Arial,sans-serif" font-size="19" fill="#555">The smallest unit of written speech: voice,</text><text x="1095.3333333333335" y="958" font-family="system-ui,-apple-system,'Segoe UI',Helvetica,Arial,sans-serif" font-size="19" fill="#555">written down.</text></svg>

@@ -64,7 +64,11 @@ export default function SettingsView() {
 
   return (
     <div className="settings">
-      <h1 className="wordmark">Susurro</h1>
+      {/* Split keeps the coral comma styled while screen readers
+          announce susurro with its comma exactly once. */}
+      <h1 className="brand-wordmark" aria-label="susurro,">
+        susurro<span className="comma" aria-hidden="true">,</span>
+      </h1>
       <div className="sub">Talk-to-text that works even when the internet doesn't.</div>
 
       <div className="field">

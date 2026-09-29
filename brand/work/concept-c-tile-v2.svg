@@ -1,0 +1,8 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 256 256">
+  <title>Susurro concept C in tile v2: dictation comma as app icon</title>
+  <rect x="8" y="8" width="240" height="240" rx="56" fill="#000"/>
+  <g transform="translate(128,128) scale(0.9) translate(-128,-128)">
+    <circle cx="154" cy="98" r="30" fill="#fff"/>
+    <path d="M 136 118 C 116 142 104 166 98 194" fill="none" stroke="#fff" stroke-width="30" stroke-linecap="round"/>
+  </g>
+</svg>

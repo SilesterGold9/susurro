@@ -1,0 +1,9 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 256 256" width="256" height="256"><title>Susurro logo</title><g transform="translate(-49.22 -23.38) scale(1.277)">
+  
+  <g transform="translate(31,-20)">
+    <g transform="translate(109,130) scale(1.22) translate(-140,-130)">
+      <circle cx="154" cy="98" r="30" fill="#0F6E56"/>
+      <path d="M 138 116 C 114 142 100 170 94 206" fill="none" stroke="#0F6E56" stroke-width="30" stroke-linecap="round"/>
+    </g>
+  </g>
+</g></svg>

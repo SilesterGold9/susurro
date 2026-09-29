@@ -1,0 +1,12 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 256 256">
+  <title>Susurro logo — primary symbol (teal tile, cream comma)</title>
+  <rect x="8" y="8" width="240" height="240" rx="56" fill="#0F6E56"/>
+  <g transform="translate(0,-10)">
+    <g transform="translate(128,128) scale(0.9) translate(-128,-128)">
+      <g transform="translate(109,130) scale(1.22) translate(-140,-130)">
+        <circle cx="154" cy="98" r="30" fill="#F1EFE8"/>
+        <path d="M 138 116 C 114 142 100 170 94 206" fill="none" stroke="#F1EFE8" stroke-width="30" stroke-linecap="round"/>
+      </g>
+    </g>
+  </g>
+</svg>

@@ -1,0 +1,7 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 256 256">
+  <title>Susurro concept C v2: dictation comma, scaled up</title>
+  <g transform="translate(118,130) scale(1.22) translate(-140,-130)">
+    <circle cx="154" cy="98" r="30" fill="#000"/>
+    <path d="M 136 118 C 116 142 104 166 98 194" fill="none" stroke="#000" stroke-width="30" stroke-linecap="round"/>
+  </g>
+</svg>

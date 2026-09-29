@@ -1,0 +1,35 @@
+{
+  "brand": "Susurro",
+  "tagline": "Talk-to-text that works even when the internet doesn't.",
+  "brief": "Offline-first voice dictation for developers and professionals (Linux + Windows). Local STT by default, optional cloud boost. The brand must feel robust, beautiful, quiet and precise — no hype.",
+  "adjectives": ["robust", "beautiful", "quiet", "precise", "warm"],
+  "criteria": "Success: ownable beyond the waveform cliché, readable at 16 px tray size, works in one colour and reversed, carries the teal/coral/cream equity, feels at home in a terminal and a README.",
+  "industry": "software",
+  "nav": ["Install", "Docs", "Releases"],
+  "brand_color": "#0F6E56",
+  "greyscale": false,
+  "final": true,
+  "round": 2,
+  "concepts": [
+    {
+      "name": "Dictation Comma",
+      "symbol": "../susurro-symbol.svg",
+      "lockup": "../susurro-horizontal.svg",
+      "stacked": "../susurro-stacked.svg",
+      "idea": "The smallest unit of written speech: voice, written down.",
+      "rationale": [
+        "Derived from what dictation does — speech becomes text — not from what microphones look like",
+        "No mic, no broadcast arcs, no equalizer bars: clear of every category cliché",
+        "Two shapes (head + tail) survive 16 px, one colour, embroidery and favicon",
+        "The coral comma after the wordmark echoes the symbol in type",
+        "Cream on teal clears 5.4:1 contrast; the palette carries over from the existing UI"
+      ]
+    }
+  ],
+  "recommendation": "Dictation Comma, approved at the concept checkpoint: proceed to rollout with the kit in brand/kit.",
+  "next_steps": [
+    "Swap the repo's susurro-logo.svg for the new primary symbol",
+    "Wire the web icon set into the Tauri app and the site head snippet",
+    "Run a trademark/reverse-image search before first public release"
+  ]
+}

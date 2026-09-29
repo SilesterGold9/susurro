@@ -1,5 +1,7 @@
 # Susurro
 
+<img src="susurro-logo.svg" width="64" alt="Susurro logo: a cream dictation comma on a teal tile">
+
 > Talk-to-text that works even when the internet doesn't.
 
 Offline-first voice dictation for Linux (Hyprland) + Windows. Local STT by default, optional free-tier cloud (Groq, NVIDIA NIM) when online.

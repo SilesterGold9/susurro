@@ -16,9 +16,9 @@ path to GPU acceleration later.
 - **Tagline**: "Talk-to-text that works even when the internet doesn't."
 - **Palette**: primary teal `#0F6E56`, accent coral `#D85A30`, neutrals
   `#1C1C1A` (dark) / `#F1EFE8` (light).
-- **Logo**: `susurro-logo.svg` — a rounded-square mark containing a vertical
-  waveform. Deliberately the same shape language as the in-app floating
-  pill, so the icon and the live UI are visually one object.
+- **Logo**: `susurro-logo.svg` holds a dictation comma, cream on a teal
+  tile. It means speech written down. Masters and rules in `brand/kit/`.
+  The wordmark is `susurro,` in bold lowercase with a coral comma.
 - **Typography**: system/geometric sans (Inter or platform default) — no
   custom type needed for a dev-facing tool.
 - **Tone**: quiet, precise, no hype. Error messages are actionable, not
@@ -33,7 +33,8 @@ for technical surfaces (history, provider health, benchmarks).
 - Warm neutral surfaces, never pure black/white, in both light and dark mode.
 - Teal and coral (from the logo) are the only two accent colors on screen —
   one accent action per view, everything else neutral.
-- Serif wordmark for "Susurro" and onboarding copy only; sans for all UI
+- Wordmark is `susurro,` in bold lowercase sans with a coral comma;
+  serif is reserved for the onboarding headline only; sans for all UI
   chrome; monospace for anything numeric or technical (latencies, model
   names, timestamps).
 - History/status rows styled like LeetCode submissions: snippet, a small

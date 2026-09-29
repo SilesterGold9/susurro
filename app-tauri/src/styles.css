@@ -1,5 +1,6 @@
 /* Susurro design system: warm neutrals, teal + coral accents only,
-   serif wordmark, sans chrome, mono for numbers. */
+   brand wordmark (sans bold lowercase, coral comma), sans chrome,
+   mono for numbers. Serif reserved for onboarding headlines. */
 :root {
   --bg-dark: #1c1c1a;
   --bg-light: #f1efe8;
@@ -20,7 +21,17 @@ html, body {
 }
 html { background: transparent; }
 #root { background: transparent; }
-.wordmark { font-family: Georgia, "Times New Roman", serif; }
+/* Brand wordmark: same stack and spacing as the susurro-wordmark.svg
+   master (Inter, Liberation Sans, Arial; bold; letter-spacing -2 at
+   116px scale, proportional here), mandatory coral comma. */
+.brand-wordmark {
+  font-family: Inter, "Liberation Sans", Arial, system-ui, sans-serif;
+  font-weight: 700;
+  font-size: 20px;
+  letter-spacing: -0.35px;
+  margin: 0 0 4px;
+}
+.brand-wordmark .comma { color: var(--coral); }
 
 /* Floating pill: the window is exactly 364x64, so the pill is centered
    in the viewport (symmetric gutters) and its shadow stays small enough
@@ -139,7 +150,6 @@ html { background: transparent; }
 @media (prefers-color-scheme: dark) {
   .settings { background: var(--bg-dark); color: var(--text-dark); }
 }
-.settings h1 { font-size: 20px; margin: 0 0 4px; }
 .settings .sub { opacity: 0.65; margin-bottom: 20px; }
 .field { margin-bottom: 14px; }
 .field label { display: block; font-size: 12px; opacity: 0.7; margin-bottom: 4px; }
