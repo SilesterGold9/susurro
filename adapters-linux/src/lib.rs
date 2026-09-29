@@ -168,7 +168,7 @@ impl TextInjectionPort for MockInjector {
 pub fn focused_app() -> Option<String> {
     #[cfg(not(target_os = "linux"))]
     {
-        return None;
+        None
     }
     #[cfg(target_os = "linux")]
     {

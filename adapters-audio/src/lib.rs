@@ -225,7 +225,7 @@ pub fn classify_mic_level(peak: i32) -> MicLevel {
 pub fn probe_mic_level() -> Option<(i32, f32)> {
     #[cfg(not(target_os = "linux"))]
     {
-        return None;
+        None
     }
     #[cfg(target_os = "linux")]
     {
