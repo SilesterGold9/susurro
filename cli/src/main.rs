@@ -294,6 +294,19 @@ fn doctor() -> anyhow::Result<()> {
         Some(name) => println!("mic: found ({name})"),
         None => println!("mic: missing — check input device and permissions"),
     }
+    // Live gain check: 1s probe reported in dBFS so gain is a number,
+    // not a vibe. Silent during the probe reads as muted, not broken.
+    match susurro_adapters_audio::probe_mic_level() {
+        Some((peak, db)) => println!(
+            "mic level: peak {peak} ({db:.0} dBFS) — {}",
+            match susurro_adapters_audio::classify_mic_level(peak) {
+                susurro_adapters_audio::MicLevel::Healthy => "healthy gain",
+                susurro_adapters_audio::MicLevel::Low => "low — raise input gain",
+                susurro_adapters_audio::MicLevel::Silent => "silent — check mute and source",
+            }
+        ),
+        None => println!("mic level: unavailable (needs pw-record or parecord on Linux)"),
+    }
     let devices = susurro_adapters_audio::list_input_devices();
     if devices.is_empty() {
         println!("mic devices: none");

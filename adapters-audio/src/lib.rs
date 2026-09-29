@@ -189,6 +189,52 @@ pub fn peak_amplitude_tail(pcm: &[i16]) -> i32 {
     peak_amplitude(trim_transient(pcm))
 }
 
+/// Peak amplitude as dBFS: 20 * log10(peak / 32767). Full scale reads
+/// 0, digital silence floors at -96 instead of negative infinity.
+pub fn peak_to_dbfs(peak: i32) -> f32 {
+    if peak <= 0 {
+        return -96.0;
+    }
+    (20.0 * (peak as f32 / i16::MAX as f32).log10()).max(-96.0)
+}
+
+/// Mic gain verdict from a probe peak. Healthy speech peaks land above
+/// -30 dBFS; the old near-silence hint at peak 500 sits near -36.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum MicLevel {
+    Healthy,
+    Low,
+    Silent,
+}
+
+pub fn classify_mic_level(peak: i32) -> MicLevel {
+    let db = peak_to_dbfs(peak);
+    if db >= -30.0 {
+        MicLevel::Healthy
+    } else if db >= -50.0 {
+        MicLevel::Low
+    } else {
+        MicLevel::Silent
+    }
+}
+
+/// One-second sound-server probe for `susurro doctor`: returns the peak
+/// and dBFS of live mic input. None off Linux, without pw-record or
+/// parecord, or when the source is muted. Never errors, so doctor can
+/// print a fallback line instead of failing.
+pub fn probe_mic_level() -> Option<(i32, f32)> {
+    #[cfg(not(target_os = "linux"))]
+    {
+        return None;
+    }
+    #[cfg(target_os = "linux")]
+    {
+        let pcm = record_via_pipewire(1, None).ok()?;
+        let peak = peak_amplitude_tail(&pcm);
+        Some((peak, peak_to_dbfs(peak)))
+    }
+}
+
 /// Chunk minus the startup transient, for VAD decisions.
 pub fn trim_transient(pcm: &[i16]) -> &[i16] {
     if pcm.len() > STARTUP_SKIP_SAMPLES {
@@ -1029,10 +1075,18 @@ mod tests {
         assert_eq!(zero_crossing_rate(&[0; 480]), 0.0);
         assert_eq!(zero_crossing_rate(&[5]), 0.0);
         // Per-sample alternating tone pins near 1.
-        let hash: Vec<i16> = (0..480).map(|i| if i % 2 == 0 { 1000 } else { -1000 }).collect();
-        assert!(zero_crossing_rate(&hash) > 0.99, "{}", zero_crossing_rate(&hash));
+        let hash: Vec<i16> = (0..480)
+            .map(|i| if i % 2 == 0 { 1000 } else { -1000 })
+            .collect();
+        assert!(
+            zero_crossing_rate(&hash) > 0.99,
+            "{}",
+            zero_crossing_rate(&hash)
+        );
         // 200Hz square (period 80): 2 crossings per 80 samples.
-        let voiced: Vec<i16> = (0..480).map(|i| if (i / 40) % 2 == 0 { 3000 } else { -3000 }).collect();
+        let voiced: Vec<i16> = (0..480)
+            .map(|i| if (i / 40) % 2 == 0 { 3000 } else { -3000 })
+            .collect();
         let z = zero_crossing_rate(&voiced);
         assert!(z > 0.01 && z < 0.1, "{z}");
     }
@@ -1109,5 +1163,28 @@ mod tests {
             assert!(vad.chunk_is_speech(&loud));
         }
         assert!(vad.effective_threshold() <= 800.0 * 3.0 + f32::EPSILON);
+    }
+
+    #[test]
+    fn dbfs_maps_full_scale_and_silence() {
+        assert_eq!(peak_to_dbfs(32767), 0.0);
+        assert_eq!(peak_to_dbfs(0), -96.0);
+        assert_eq!(peak_to_dbfs(-5), -96.0);
+        // The old near-silence hint at peak 500 lands near -36 dBFS.
+        let db = peak_to_dbfs(500);
+        assert!(db > -37.0 && db < -35.0, "{db}");
+    }
+
+    #[test]
+    fn mic_level_classifies_gain() {
+        assert_eq!(classify_mic_level(12000), MicLevel::Healthy);
+        assert_eq!(classify_mic_level(500), MicLevel::Low);
+        assert_eq!(classify_mic_level(0), MicLevel::Silent);
+    }
+
+    #[test]
+    fn mic_probe_never_panics() {
+        // No tools or no compositor must yield None, never a panic.
+        let _ = probe_mic_level();
     }
 }
