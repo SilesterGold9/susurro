@@ -47,9 +47,30 @@ jobs:
         with:
           tagName: ${{ github.ref_name }}
           releaseName: "Susurro ${{ github.ref_name }}"
-          releaseBody: "See the milestone changelog on the repo."
+          releaseBody: |
+            Talk-to-text that works even when the internet does not.
+
+            What's inside
+            - Local STT by default (whisper.cpp base.en on CPU), optional cloud when online.
+            - Pill overlay with live waveform, staged progress, and sound cues.
+            - SQLite history, persistent tickets, custom dictionary, fail-open cleanup.
+            - See the milestone changelog and open issues on the repo for scope.
+
+            Assets
+            - Linux: AppImage and .deb. Windows: NSIS setup. Standalone CLI: susurro (Linux) and susurro.exe (Windows).
+            - latest.json powers the in-app updater. Settings checks quietly and never forces a modal.
+
+            Install
+            - Linux: run the AppImage or install the .deb, then install whisper-cli, a whisper model, wl-copy, ydotool with ydotoold running, and socat for paste.
+            - Windows: run the setup, then use the CLI with --stdout until v0.6.0 adapters land.
+            - Run susurro doctor to verify mic, tools, model, and updater reachability.
+
+            Verify
+            - cargo fmt --all -- --check, cargo clippy --workspace --all-targets -- -D warnings, cargo test --workspace.
+            - cargo run -p susurro-cli -- doctor plus listen --mock --stdout for a hardware-free proof.
           releaseDraft: false
           prerelease: ${{ contains(github.ref_name, 'beta') }}
+          includeUpdaterJson: true
           projectPath: app-tauri
           args: ${{ matrix.args }}
 
