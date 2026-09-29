@@ -38,6 +38,15 @@ pub struct Transcript {
 pub trait SpeechToTextPort: Send + Sync {
     fn transcribe(&self, pcm_s16_mono_16k: &[i16]) -> Result<Transcript, crate::CoreError>;
     fn model_name(&self) -> &str;
+    /// Partial hypothesis for the audio so far. Display-only: callers
+    /// must never ticket, store, or inject a partial. Default None for
+    /// batch adapters; windowed decoders override it.
+    fn transcribe_partial(
+        &self,
+        _pcm_s16_mono_16k: &[i16],
+    ) -> Option<Result<Transcript, crate::CoreError>> {
+        None
+    }
 }
 
 pub trait TextPostProcessorPort: Send + Sync {

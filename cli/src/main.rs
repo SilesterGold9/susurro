@@ -60,6 +60,11 @@ enum Cmd {
         /// auto-detect; blocklisted apps force local-only STT.
         #[arg(long)]
         app: Option<String>,
+        /// Print windowed partial transcripts while recording (Linux
+        /// auto-stop only). Costs about one extra 8s decode per 3s of
+        /// speech; display-only, the final decode decides.
+        #[arg(long, default_value_t = false)]
+        live: bool,
     },
     /// Wait for the Hyprland hotkey, then run Listen in a loop.
     Daemon {
@@ -88,6 +93,11 @@ enum Cmd {
         /// auto-detect; blocklisted apps force local-only STT.
         #[arg(long)]
         app: Option<String>,
+        /// Print windowed partial transcripts while recording (Linux
+        /// auto-stop only). Costs about one extra 8s decode per 3s of
+        /// speech; display-only, the final decode decides.
+        #[arg(long, default_value_t = false)]
+        live: bool,
     },
     /// Print Hyprland bind snippet for the hotkey socket.
     HyprlandBind {
@@ -144,6 +154,7 @@ fn main() -> anyhow::Result<()> {
             cleanup,
             ollama_model,
             app,
+            live,
         } => listen_real(&ListenOpts {
             seconds,
             model,
@@ -155,6 +166,7 @@ fn main() -> anyhow::Result<()> {
             cleanup,
             ollama_model,
             app,
+            live,
             mock_text: "hello from susurro".into(),
         }),
         Cmd::Daemon {
@@ -169,6 +181,7 @@ fn main() -> anyhow::Result<()> {
             cleanup,
             ollama_model,
             app,
+            live,
         } => daemon(
             &socket,
             &ListenOpts {
@@ -182,6 +195,7 @@ fn main() -> anyhow::Result<()> {
                 cleanup,
                 ollama_model,
                 app,
+                live,
                 mock_text: "hello from susurro".into(),
             },
         ),
@@ -235,6 +249,7 @@ struct ListenOpts {
     cleanup: String,
     ollama_model: String,
     app: Option<String>,
+    live: bool,
     mock_text: String,
 }
 
@@ -482,6 +497,7 @@ impl AudioCapturePort for MockCaptureOnce {
 
 struct MockSttOnce {
     text: String,
+    partial_calls: std::sync::Mutex<usize>,
 }
 impl SpeechToTextPort for MockSttOnce {
     fn transcribe(
@@ -496,6 +512,24 @@ impl SpeechToTextPort for MockSttOnce {
     fn model_name(&self) -> &str {
         "mock"
     }
+    /// Deterministic growing prefix: call n reveals the first n words.
+    /// Lets --mock --live prove the partial display path hardware-free.
+    fn transcribe_partial(
+        &self,
+        _pcm: &[i16],
+    ) -> Option<Result<susurro_core::ports::Transcript, susurro_core::CoreError>> {
+        let words: Vec<&str> = self.text.split_whitespace().collect();
+        if words.is_empty() {
+            return None;
+        }
+        let mut calls = self.partial_calls.lock().unwrap();
+        *calls += 1;
+        let shown = words[..(*calls).min(words.len())].join(" ");
+        Some(Ok(susurro_core::ports::Transcript {
+            text: shown,
+            is_partial: true,
+        }))
+    }
 }
 
 struct StdoutInjector;
@@ -506,6 +540,48 @@ impl susurro_core::ports::TextInjectionPort for StdoutInjector {
     }
 }
 
+/// Owned live-partial decoder for the record loop (v0.4.0, issue 23).
+/// Mock replays a growing word prefix; real decodes a trailing window.
+/// Both speak through the port so the loop never names a backend.
+enum LiveDecoder {
+    Mock(MockSttOnce),
+    Windowed(susurro_adapters_stt_local::WindowedPartial),
+}
+
+impl LiveDecoder {
+    fn as_stt(&self) -> &dyn SpeechToTextPort {
+        match self {
+            Self::Mock(m) => m,
+            Self::Windowed(w) => w,
+        }
+    }
+}
+
+/// Build the --live decoder sharing the final decode config, or None.
+/// Linux-only caller: the record loop is the only consumer.
+#[cfg(target_os = "linux")]
+fn build_live_decoder(
+    opts: &ListenOpts,
+    model_path: &str,
+    dict_prompt: &str,
+) -> Option<LiveDecoder> {
+    if !opts.live {
+        return None;
+    }
+    if opts.mock {
+        Some(LiveDecoder::Mock(MockSttOnce {
+            text: opts.mock_text.clone(),
+            partial_calls: Default::default(),
+        }))
+    } else {
+        let whisper = susurro_adapters_stt_local::WhisperLocal::base_en(model_path.into())
+            .with_prompt(dict_prompt);
+        Some(LiveDecoder::Windowed(
+            susurro_adapters_stt_local::WindowedPartial::new(whisper),
+        ))
+    }
+}
+
 fn listen_once(mock_text: &str) -> anyhow::Result<()> {
     let mut cap = MockCaptureOnce {
         text_len: 1600,
@@ -513,6 +589,7 @@ fn listen_once(mock_text: &str) -> anyhow::Result<()> {
     };
     let stt = MockSttOnce {
         text: mock_text.into(),
+        partial_calls: Default::default(),
     };
     let tickets = TicketRegistry::new();
     let out = Pipeline::run_once(
@@ -564,6 +641,16 @@ fn run_utterance(opts: &ListenOpts, tickets: &TicketRegistry) -> anyhow::Result<
     // --auto-stop records 1s chunks and ends on VAD end-of-speech
     // instead of the full window (chunk gaps until v0.4.0 streaming).
     // Only a VAD end plays the stop cue; cap-timeout stops stay silent.
+    // Model and dictionary resolve before capture so the --live partial
+    // decoder shares the exact config of the final decode below.
+    let model_path = resolve_model(&opts.model);
+    let dict_prompt = susurro_storage::SqliteDictionary::open(&db_path)
+        .map(|d| d.prompt().unwrap_or_default())
+        .unwrap_or_default();
+    #[cfg(not(target_os = "linux"))]
+    if opts.live {
+        eprintln!("--live needs Linux auto-stop; ignoring.");
+    }
     let cues = susurro_adapters_audio::CuePlayer::new(opts.sound);
     let mut capture: Box<dyn AudioCapturePort> = if opts.mock {
         Box::new(MockCaptureOnce {
@@ -573,7 +660,8 @@ fn run_utterance(opts: &ListenOpts, tickets: &TicketRegistry) -> anyhow::Result<
     } else if opts.auto_stop {
         #[cfg(target_os = "linux")]
         {
-            let (pcm, _) = record_with_auto_stop(opts, &cues)?;
+            let live = build_live_decoder(opts, &model_path, &dict_prompt);
+            let (pcm, _) = record_with_auto_stop(opts, &cues, live.as_ref().map(|d| d.as_stt()))?;
             Box::new(started_buffer(pcm)?)
         }
         #[cfg(not(target_os = "linux"))]
@@ -644,11 +732,8 @@ fn run_utterance(opts: &ListenOpts, tickets: &TicketRegistry) -> anyhow::Result<
     // STT (dictionary phrases boost whisper via initial prompt, #15).
     // Cloud chain in v0.3.0 (#19, #20): Groq, then NIM, then local guarantee.
     // Keys come from the OS keyring first, env as override. Missing keys
-    // skip that provider, failures fall back to local.
-    let model_path = resolve_model(&opts.model);
-    let dict_prompt = susurro_storage::SqliteDictionary::open(&db_path)
-        .map(|d| d.prompt().unwrap_or_default())
-        .unwrap_or_default();
+    // skip that provider, failures fall back to local. Model and prompt
+    // resolved before capture above, shared with the --live decoder.
     let mock_stt;
     let real_stt;
     let chain_stt;
@@ -656,6 +741,7 @@ fn run_utterance(opts: &ListenOpts, tickets: &TicketRegistry) -> anyhow::Result<
     let stt: &dyn SpeechToTextPort = if opts.mock {
         mock_stt = MockSttOnce {
             text: opts.mock_text.clone(),
+            partial_calls: Default::default(),
         };
         chain_ref = None;
         &mock_stt
@@ -947,13 +1033,16 @@ fn privacy_list() -> anyhow::Result<()> {
 }
 
 /// VAD auto-stop: record 1s chunks up to `opts.seconds`, ending early
-/// on end-of-speech. Chunk-process gaps apply until v0.4.0 streaming.
-/// Returns the audio plus whether VAD ended it: only a VAD end plays
-/// the stop cue, cap-timeout stops stay silent by design.
+/// on end-of-speech. When `live` holds an STT, each chunk also asks it
+/// for a partial hypothesis printed for display; partials never touch
+/// tickets, history, or injection. Returns the audio plus whether VAD
+/// ended it: only a VAD end plays the stop cue, cap-timeout stops stay
+/// silent by design.
 #[cfg(target_os = "linux")]
 fn record_with_auto_stop(
     opts: &ListenOpts,
     cues: &susurro_adapters_audio::CuePlayer,
+    live: Option<&dyn SpeechToTextPort>,
 ) -> anyhow::Result<(Vec<i16>, bool)> {
     use susurro_adapters_audio::{Cue, EndpointDecision, VadEndpoint};
     cues.play(Cue::Start);
@@ -975,6 +1064,14 @@ fn record_with_auto_stop(
         );
         let decision = endpoint.push(tail, 1.0);
         pcm_all.extend_from_slice(&chunk);
+        if let Some(stt) = live {
+            match stt.transcribe_partial(&pcm_all) {
+                Some(Ok(partial)) if !partial.text.trim().is_empty() => {
+                    eprintln!("partial: {}", partial.text.trim());
+                }
+                _ => {}
+            }
+        }
         if decision == EndpointDecision::EndOfSpeech {
             eprintln!("end-of-speech detected.");
             vad_end = true;
@@ -1021,5 +1118,38 @@ fn daemon(socket_path: &str, opts: &ListenOpts) -> anyhow::Result<()> {
             Ok(()) => println!("done. Injected."),
             Err(e) => eprintln!("Couldn't complete utterance. Continuing: {e:#}"),
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn mock(text: &str) -> MockSttOnce {
+        MockSttOnce {
+            text: text.into(),
+            partial_calls: Default::default(),
+        }
+    }
+
+    #[test]
+    fn mock_partial_grows_one_word_per_call() {
+        let stt = mock("hello from susurro");
+        let first = stt.transcribe_partial(&[0; 160]).unwrap().unwrap();
+        assert!(first.is_partial);
+        assert_eq!(first.text, "hello");
+        let second = stt.transcribe_partial(&[0; 160]).unwrap().unwrap();
+        assert_eq!(second.text, "hello from");
+        let third = stt.transcribe_partial(&[0; 160]).unwrap().unwrap();
+        assert_eq!(third.text, "hello from susurro");
+        // Saturates at the full text.
+        let fourth = stt.transcribe_partial(&[0; 160]).unwrap().unwrap();
+        assert_eq!(fourth.text, "hello from susurro");
+    }
+
+    #[test]
+    fn mock_partial_empty_text_yields_none() {
+        let stt = mock("   ");
+        assert!(stt.transcribe_partial(&[0; 160]).is_none());
     }
 }
