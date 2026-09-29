@@ -289,7 +289,7 @@ fn cloud_config(
 }
 
 fn doctor() -> anyhow::Result<()> {
-    println!("Susurro doctor (v0.0.1)");
+    println!("Susurro doctor (v{})", env!("CARGO_PKG_VERSION"));
     match susurro_adapters_audio::default_input_name() {
         Some(name) => println!("mic: found ({name})"),
         None => println!("mic: missing — check input device and permissions"),

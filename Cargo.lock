@@ -1522,7 +1522,7 @@ checksum = "7da8b5736845d9f2fcb837ea5d9e2628564b3b043a70948a3f0b778838c5fb4f"
 
 [[package]]
 name = "susurro-adapters-audio"
-version = "0.0.1"
+version = "0.2.0"
 dependencies = [
  "cpal",
  "susurro-core",
@@ -1531,7 +1531,7 @@ dependencies = [
 
 [[package]]
 name = "susurro-adapters-cleanup"
-version = "0.0.1"
+version = "0.2.0"
 dependencies = [
  "serde_json",
  "susurro-core",
@@ -1539,7 +1539,7 @@ dependencies = [
 
 [[package]]
 name = "susurro-adapters-linux"
-version = "0.0.1"
+version = "0.2.0"
 dependencies = [
  "serde_json",
  "susurro-core",
@@ -1547,7 +1547,7 @@ dependencies = [
 
 [[package]]
 name = "susurro-adapters-stt-cloud"
-version = "0.0.1"
+version = "0.2.0"
 dependencies = [
  "serde_json",
  "susurro-core",
@@ -1555,7 +1555,7 @@ dependencies = [
 
 [[package]]
 name = "susurro-adapters-stt-local"
-version = "0.0.1"
+version = "0.2.0"
 dependencies = [
  "susurro-core",
  "thiserror 2.0.21",
@@ -1563,14 +1563,14 @@ dependencies = [
 
 [[package]]
 name = "susurro-adapters-windows"
-version = "0.0.1"
+version = "0.2.0"
 dependencies = [
  "susurro-core",
 ]
 
 [[package]]
 name = "susurro-cli"
-version = "0.0.1"
+version = "0.2.0"
 dependencies = [
  "anyhow",
  "clap",
@@ -1585,7 +1585,7 @@ dependencies = [
 
 [[package]]
 name = "susurro-core"
-version = "0.0.1"
+version = "0.2.0"
 dependencies = [
  "serde",
  "serde_json",
@@ -1594,7 +1594,7 @@ dependencies = [
 
 [[package]]
 name = "susurro-storage"
-version = "0.0.1"
+version = "0.2.0"
 dependencies = [
  "keyring",
  "rusqlite",
