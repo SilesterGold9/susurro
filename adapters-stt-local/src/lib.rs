@@ -38,6 +38,10 @@ pub struct WhisperLocal {
     pub binary: String,
     /// Initial prompt for vocabulary boosting (dictionary phrases).
     pub prompt: Option<String>,
+    /// whisper.cpp no-speech threshold: segments scoring above this as
+    /// non-speech are suppressed by the binary. Default 0.6 matches
+    /// whisper.cpp. Blank output is rejected below regardless.
+    pub no_speech_threshold: f32,
 }
 
 impl WhisperLocal {
@@ -46,6 +50,7 @@ impl WhisperLocal {
             model_path,
             binary: "whisper-cli".into(),
             prompt: None,
+            no_speech_threshold: 0.6,
         }
     }
 
@@ -55,6 +60,37 @@ impl WhisperLocal {
         }
         self
     }
+
+    /// Command for one transcription, extracted for shape tests.
+    /// NOTE: no --output-txt, that writes a sidecar file and leaves
+    /// stdout empty. --no-prints + -nt keeps stdout to transcript only.
+    fn command(&self, wav_path: &std::path::Path) -> Command {
+        let mut cmd = Command::new(&self.binary);
+        cmd.arg("-m")
+            .arg(&self.model_path)
+            .arg("-f")
+            .arg(wav_path)
+            .arg("-l")
+            .arg("en")
+            .arg("--no-prints")
+            .arg("-nt")
+            .arg("--no-speech-thold")
+            .arg(self.no_speech_threshold.to_string());
+        if let Some(p) = self.prompt.as_deref() {
+            cmd.arg("--prompt").arg(p);
+        }
+        cmd
+    }
+}
+
+/// True when the transcript holds nothing worth injecting: empty,
+/// whitespace, or a bracketed non-speech tag like [BLANK_AUDIO].
+pub fn is_blank_transcript(text: &str) -> bool {
+    let t = text.trim();
+    if t.is_empty() {
+        return true;
+    }
+    t.starts_with('[') && t.ends_with(']') || t.starts_with('(') && t.ends_with(')')
 }
 
 impl SpeechToTextPort for WhisperLocal {
@@ -79,27 +115,24 @@ impl SpeechToTextPort for WhisperLocal {
             .map_err(|e| CoreError::Transcription(format!("temp write failed: {e}")))?;
         // NOTE: no --output-txt — that writes a sidecar file and leaves
         // stdout empty. --no-prints + -nt keeps stdout to transcript only.
-        let out = {
-            let mut cmd = Command::new(&self.binary);
-            cmd.arg("-m")
-                .arg(&self.model_path)
-                .arg("-f")
-                .arg(&tmp)
-                .arg("-l")
-                .arg("en")
-                .arg("--no-prints")
-                .arg("-nt");
-            if let Some(p) = self.prompt.as_deref() {
-                cmd.arg("--prompt").arg(p);
-            }
-            cmd.output()
-        };
+        let out = self.command(&tmp).output();
         let _ = std::fs::remove_file(&tmp);
         match out {
-            Ok(o) if o.status.success() => Ok(Transcript {
-                text: String::from_utf8_lossy(&o.stdout).trim().to_string(),
-                is_partial: false,
-            }),
+            Ok(o) if o.status.success() => {
+                let text = String::from_utf8_lossy(&o.stdout).trim().to_string();
+                // No-speech gate: silence must never inject an empty string
+                // or a hallucinated tag into the app and history.
+                if is_blank_transcript(&text) {
+                    return Err(CoreError::Transcription(
+                        "heard only silence, nothing injected. Speak during the recording window."
+                            .into(),
+                    ));
+                }
+                Ok(Transcript {
+                    text,
+                    is_partial: false,
+                })
+            }
             Ok(o) => Err(CoreError::Transcription(format!(
                 "whisper binary failed: {}",
                 String::from_utf8_lossy(&o.stderr).trim()
@@ -166,5 +199,24 @@ mod tests {
         assert_eq!(wav.len(), 44 + 6);
         // Sample rate field.
         assert_eq!(u32::from_le_bytes(wav[24..28].try_into().unwrap()), 16_000);
+    }
+
+    #[test]
+    fn blank_transcripts_never_inject() {
+        assert!(is_blank_transcript(""));
+        assert!(is_blank_transcript("   "));
+        assert!(is_blank_transcript("[BLANK_AUDIO]"));
+        assert!(is_blank_transcript("(silence)"));
+        assert!(!is_blank_transcript("hello world"));
+        assert!(!is_blank_transcript("well (known) fact"));
+    }
+
+    #[test]
+    fn command_carries_no_speech_gate() {
+        let w = WhisperLocal::base_en(PathBuf::from("/models/base.en.bin"));
+        let dbg = format!("{:?}", w.command(std::path::Path::new("/tmp/x.wav")));
+        assert!(dbg.contains("--no-speech-thold"), "{dbg}");
+        assert!(dbg.contains("0.6"), "{dbg}");
+        assert!(!dbg.contains("--output-txt"), "{dbg}");
     }
 }
