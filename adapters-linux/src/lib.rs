@@ -160,3 +160,56 @@ impl TextInjectionPort for MockInjector {
         Ok(())
     }
 }
+
+/// Focused app class on Hyprland for privacy routing (v0.3.0, issue 21).
+/// Runs `hyprctl activewindow -j` and reads the `class` field.
+/// Returns None off Linux, when hyprctl is missing, or when parsing fails.
+/// Never errors, so a broken detector fails open to the normal chain.
+pub fn focused_app() -> Option<String> {
+    #[cfg(not(target_os = "linux"))]
+    {
+        return None;
+    }
+    #[cfg(target_os = "linux")]
+    {
+        let out = std::process::Command::new("hyprctl")
+            .args(["activewindow", "-j"])
+            .output()
+            .ok()?;
+        if !out.status.success() {
+            return None;
+        }
+        parse_active_window_class(&String::from_utf8_lossy(&out.stdout))
+    }
+}
+
+/// Parse the `class` field from `hyprctl activewindow -j` output.
+pub fn parse_active_window_class(json: &str) -> Option<String> {
+    let v: serde_json::Value = serde_json::from_str(json).ok()?;
+    let class = v.get("class")?.as_str()?.trim();
+    if class.is_empty() {
+        return None;
+    }
+    Some(class.to_string())
+}
+
+#[cfg(test)]
+mod tests {
+    #[test]
+    fn parses_hyprland_active_window() {
+        let sample = r#"{"address":"0x1234","class":"kitty","title":"shell"}"#;
+        assert_eq!(
+            super::parse_active_window_class(sample).as_deref(),
+            Some("kitty")
+        );
+        assert_eq!(super::parse_active_window_class(r#"{"class":"  "}"#), None);
+        assert_eq!(super::parse_active_window_class("not json"), None);
+        assert_eq!(super::parse_active_window_class(r#"{"title":"x"}"#), None);
+    }
+
+    #[test]
+    fn focused_app_never_panics() {
+        // Missing hyprctl or no compositor must yield None, never a panic.
+        let _ = super::focused_app();
+    }
+}

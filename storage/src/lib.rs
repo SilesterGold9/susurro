@@ -64,6 +64,9 @@ fn open_db(path: &std::path::Path) -> Result<rusqlite::Connection, CoreError> {
          );
          CREATE TABLE IF NOT EXISTS dictionary (
            phrase TEXT PRIMARY KEY
+         );
+         CREATE TABLE IF NOT EXISTS privacy_apps (
+           app TEXT PRIMARY KEY
          );",
     )
     .map_err(|e| CoreError::Storage(format!("Couldn't migrate db: {e}")))?;
@@ -241,6 +244,88 @@ impl SqliteDictionary {
     }
 }
 
+/// Per-app local-only policy list (v0.3.0, issue 21).
+/// Mirrors SqliteDictionary. Defaults seed on first open so the list
+/// stays visible and removable. Matching lives in core PrivacyPolicy.
+pub struct SqlitePrivacy {
+    conn: std::sync::Mutex<rusqlite::Connection>,
+}
+
+impl SqlitePrivacy {
+    pub fn open(path: &std::path::Path) -> Result<Self, CoreError> {
+        let store = Self {
+            conn: std::sync::Mutex::new(open_db(path)?),
+        };
+        store.seed_defaults()?;
+        Ok(store)
+    }
+
+    fn seed_defaults(&self) -> Result<(), CoreError> {
+        let conn = self
+            .conn
+            .lock()
+            .map_err(|e| CoreError::Storage(format!("db lock poisoned: {e}")))?;
+        for app in susurro_core::privacy::DEFAULT_BLOCKLIST {
+            conn.execute(
+                "INSERT OR IGNORE INTO privacy_apps (app) VALUES (?1)",
+                rusqlite::params![app],
+            )
+            .map_err(|e| CoreError::Storage(e.to_string()))?;
+        }
+        Ok(())
+    }
+
+    pub fn add(&self, app: &str) -> Result<(), CoreError> {
+        let app = app.trim().to_lowercase();
+        if app.is_empty() {
+            return Err(CoreError::Storage("empty app name".into()));
+        }
+        self.conn
+            .lock()
+            .map_err(|e| CoreError::Storage(format!("db lock poisoned: {e}")))?
+            .execute(
+                "INSERT OR IGNORE INTO privacy_apps (app) VALUES (?1)",
+                rusqlite::params![app],
+            )
+            .map_err(|e| CoreError::Storage(e.to_string()))?;
+        Ok(())
+    }
+
+    pub fn remove(&self, app: &str) -> Result<(), CoreError> {
+        self.conn
+            .lock()
+            .map_err(|e| CoreError::Storage(format!("db lock poisoned: {e}")))?
+            .execute(
+                "DELETE FROM privacy_apps WHERE app = ?1",
+                rusqlite::params![app.trim().to_lowercase()],
+            )
+            .map_err(|e| CoreError::Storage(e.to_string()))?;
+        Ok(())
+    }
+
+    // allow(let_and_return): same borrowck drop-order constraint as recent().
+    #[allow(clippy::let_and_return)]
+    pub fn list(&self) -> Result<Vec<String>, CoreError> {
+        let conn = self
+            .conn
+            .lock()
+            .map_err(|e| CoreError::Storage(format!("db lock poisoned: {e}")))?;
+        let mut stmt = conn
+            .prepare("SELECT app FROM privacy_apps ORDER BY app")
+            .map_err(|e| CoreError::Storage(e.to_string()))?;
+        let out = stmt
+            .query_map([], |row| row.get(0))
+            .map_err(|e| CoreError::Storage(e.to_string()))?
+            .collect::<Result<Vec<String>, _>>()
+            .map_err(|e| CoreError::Storage(e.to_string()));
+        out
+    }
+
+    pub fn policy(&self) -> Result<susurro_core::PrivacyPolicy, CoreError> {
+        Ok(susurro_core::PrivacyPolicy::new(&self.list()?))
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -297,6 +382,22 @@ mod tests {
         assert_eq!(d.prompt().unwrap(), "Susurro, hyprland");
         d.remove("hyprland").unwrap();
         assert_eq!(d.list().unwrap(), vec!["Susurro"]);
+        let _ = std::fs::remove_file(&p);
+    }
+
+    #[test]
+    fn privacy_seeds_defaults_and_roundtrips() {
+        let p = tmp_path("privacy");
+        let store = SqlitePrivacy::open(&p).unwrap();
+        let list = store.list().unwrap();
+        assert!(list.contains(&"kitty".to_string()));
+        assert!(list.contains(&"bitwarden".to_string()));
+        store.add("MyBank").unwrap();
+        assert!(store.list().unwrap().contains(&"mybank".to_string()));
+        assert!(store.policy().unwrap().is_local_only(Some("mybank-app")));
+        store.remove("kitty").unwrap();
+        assert!(!store.list().unwrap().contains(&"kitty".to_string()));
+        assert!(!store.policy().unwrap().is_local_only(Some("kitty")));
         let _ = std::fs::remove_file(&p);
     }
 }

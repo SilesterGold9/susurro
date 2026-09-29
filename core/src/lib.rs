@@ -7,12 +7,14 @@
 pub mod error;
 pub mod pipeline;
 pub mod ports;
+pub mod privacy;
 pub mod session;
 pub mod stages;
 pub mod state;
 
 pub use error::CoreError;
 pub use pipeline::Pipeline;
+pub use privacy::{PrivacyPolicy, DEFAULT_BLOCKLIST};
 pub use session::{SessionId, Ticket, TicketRegistry};
 pub use stages::{progress_for, Stage};
 pub use state::State;

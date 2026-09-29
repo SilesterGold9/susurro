@@ -56,6 +56,10 @@ enum Cmd {
         /// Ollama model for --cleanup ollama.
         #[arg(long, default_value = "qwen2.5:0.5b")]
         ollama_model: String,
+        /// Focused app override for privacy routing. Defaults to Hyprland
+        /// auto-detect; blocklisted apps force local-only STT.
+        #[arg(long)]
+        app: Option<String>,
     },
     /// Wait for the Hyprland hotkey, then run Listen in a loop.
     Daemon {
@@ -80,6 +84,10 @@ enum Cmd {
         cleanup: String,
         #[arg(long, default_value = "qwen2.5:0.5b")]
         ollama_model: String,
+        /// Focused app override for privacy routing. Defaults to Hyprland
+        /// auto-detect; blocklisted apps force local-only STT.
+        #[arg(long)]
+        app: Option<String>,
     },
     /// Print Hyprland bind snippet for the hotkey socket.
     HyprlandBind {
@@ -112,6 +120,12 @@ enum Cmd {
         /// Provider name: groq or nim.
         provider: String,
     },
+    /// Force local-only STT for an app (adds to the privacy blocklist).
+    PrivacyAdd { app: String },
+    /// Remove an app from the privacy blocklist.
+    PrivacyRemove { app: String },
+    /// List apps forced to local-only STT.
+    PrivacyList,
 }
 
 fn main() -> anyhow::Result<()> {
@@ -129,6 +143,7 @@ fn main() -> anyhow::Result<()> {
             sound,
             cleanup,
             ollama_model,
+            app,
         } => listen_real(&ListenOpts {
             seconds,
             model,
@@ -139,6 +154,7 @@ fn main() -> anyhow::Result<()> {
             sound,
             cleanup,
             ollama_model,
+            app,
             mock_text: "hello from susurro".into(),
         }),
         Cmd::Daemon {
@@ -152,6 +168,7 @@ fn main() -> anyhow::Result<()> {
             sound,
             cleanup,
             ollama_model,
+            app,
         } => daemon(
             &socket,
             &ListenOpts {
@@ -164,6 +181,7 @@ fn main() -> anyhow::Result<()> {
                 sound,
                 cleanup,
                 ollama_model,
+                app,
                 mock_text: "hello from susurro".into(),
             },
         ),
@@ -200,6 +218,9 @@ fn main() -> anyhow::Result<()> {
         Cmd::DictList => dict_list(),
         Cmd::KeySet { provider, from_env } => key_set(&provider, from_env.as_deref()),
         Cmd::KeyClear { provider } => key_clear(&provider),
+        Cmd::PrivacyAdd { app } => privacy_add(&app),
+        Cmd::PrivacyRemove { app } => privacy_remove(&app),
+        Cmd::PrivacyList => privacy_list(),
     }
 }
 
@@ -213,6 +234,7 @@ struct ListenOpts {
     sound: bool,
     cleanup: String,
     ollama_model: String,
+    app: Option<String>,
     mock_text: String,
 }
 
@@ -376,6 +398,26 @@ fn doctor() -> anyhow::Result<()> {
             }
         );
     }
+    // Privacy policy (#21): blocklisted apps force local-only.
+    match susurro_storage::SqlitePrivacy::open(&db_path()) {
+        Ok(store) => match store.list() {
+            Ok(apps) => println!(
+                "privacy policy: {} local-only apps (password managers, terminals). Manage with privacy-add, privacy-remove, privacy-list",
+                apps.len()
+            ),
+            Err(e) => println!("privacy policy: degraded ({e})"),
+        },
+        Err(e) => println!("privacy policy: degraded ({e})"),
+    }
+    #[cfg(target_os = "linux")]
+    println!(
+        "focused app: {}",
+        susurro_adapters_linux::focused_app()
+            .as_deref()
+            .unwrap_or("unknown")
+    );
+    #[cfg(not(target_os = "linux"))]
+    println!("focused app: detection is Linux-only");
     Ok(())
 }
 
@@ -560,6 +602,32 @@ fn run_utterance(opts: &ListenOpts, tickets: &TicketRegistry) -> anyhow::Result<
         cues.play(susurro_adapters_audio::Cue::Start);
     }
 
+    // Privacy routing (#21): blocklisted apps force local-only STT.
+    // The focused app comes from --app or Hyprland auto-detect.
+    // A broken policy db degrades to built-in defaults, never blocks.
+    let focused = resolve_focused_app(opts.app.as_deref());
+    let policy = match susurro_storage::SqlitePrivacy::open(&db_path) {
+        Ok(store) => match store.policy() {
+            Ok(p) => p,
+            Err(e) => {
+                eprintln!("privacy policy degraded (using defaults): {e}");
+                susurro_core::PrivacyPolicy::with_defaults(&[])
+            }
+        },
+        Err(e) => {
+            eprintln!("privacy policy degraded (using defaults): {e}");
+            susurro_core::PrivacyPolicy::with_defaults(&[])
+        }
+    };
+    let force_local = policy.is_local_only(focused.as_deref());
+    if force_local {
+        let entry = policy
+            .matched_entry(focused.as_deref())
+            .unwrap_or("blocklisted");
+        let app = focused.as_deref().unwrap_or("unknown app");
+        eprintln!("privacy: local-only in {app} (matched {entry}). Cloud skipped.");
+    }
+
     // STT (dictionary phrases boost whisper via initial prompt, #15).
     // Cloud chain in v0.3.0 (#19, #20): Groq, then NIM, then local guarantee.
     // Keys come from the OS keyring first, env as override. Missing keys
@@ -589,7 +657,7 @@ fn run_utterance(opts: &ListenOpts, tickets: &TicketRegistry) -> anyhow::Result<
             susurro_adapters_stt_cloud::NIM_BASE_URL,
             &susurro_nim_model(),
         );
-        if groq_cfg.is_none() && nim_cfg.is_none() {
+        if groq_cfg.is_none() && nim_cfg.is_none() || force_local {
             real_stt = susurro_adapters_stt_local::WhisperLocal::base_en(model_path.into())
                 .with_prompt(&dict_prompt);
             chain_ref = None;
@@ -806,6 +874,62 @@ fn key_clear(provider_name: &str) -> anyhow::Result<()> {
     susurro_storage::keys::keyring_delete(provider.account())
         .map_err(|e| anyhow::anyhow!("Couldn't clear key: {e}"))?;
     println!("cleared {provider_name} key from keyring.");
+    Ok(())
+}
+
+/// Focused app for privacy routing: explicit --app wins, else Hyprland
+/// auto-detect on Linux. None means unknown, which never matches.
+fn resolve_focused_app(explicit: Option<&str>) -> Option<String> {
+    if let Some(app) = explicit {
+        let trimmed = app.trim();
+        if !trimmed.is_empty() {
+            return Some(trimmed.to_string());
+        }
+    }
+    #[cfg(target_os = "linux")]
+    {
+        susurro_adapters_linux::focused_app()
+    }
+    #[cfg(not(target_os = "linux"))]
+    {
+        None
+    }
+}
+
+fn privacy_add(app: &str) -> anyhow::Result<()> {
+    let store = susurro_storage::SqlitePrivacy::open(&db_path())
+        .map_err(|e| anyhow::anyhow!("Couldn't open privacy policy: {e}"))?;
+    store
+        .add(app)
+        .map_err(|e| anyhow::anyhow!("Couldn't add app: {e}"))?;
+    println!("local-only: {}", app.trim().to_lowercase());
+    Ok(())
+}
+
+fn privacy_remove(app: &str) -> anyhow::Result<()> {
+    let store = susurro_storage::SqlitePrivacy::open(&db_path())
+        .map_err(|e| anyhow::anyhow!("Couldn't open privacy policy: {e}"))?;
+    store
+        .remove(app)
+        .map_err(|e| anyhow::anyhow!("Couldn't remove app: {e}"))?;
+    println!("removed: {}", app.trim().to_lowercase());
+    Ok(())
+}
+
+fn privacy_list() -> anyhow::Result<()> {
+    let store = susurro_storage::SqlitePrivacy::open(&db_path())
+        .map_err(|e| anyhow::anyhow!("Couldn't open privacy policy: {e}"))?;
+    let apps = store
+        .list()
+        .map_err(|e| anyhow::anyhow!("Couldn't list policy: {e}"))?;
+    if apps.is_empty() {
+        println!("privacy policy empty. Cloud allowed everywhere.");
+    } else {
+        println!("local-only apps (cloud skipped):");
+        for app in apps {
+            println!("- {app}");
+        }
+    }
     Ok(())
 }
 

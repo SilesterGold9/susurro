@@ -1541,6 +1541,7 @@ dependencies = [
 name = "susurro-adapters-linux"
 version = "0.0.1"
 dependencies = [
+ "serde_json",
  "susurro-core",
 ]
 
