@@ -291,6 +291,30 @@ fn doctor() -> anyhow::Result<()> {
         _ => println!("ollama server: down — --cleanup ollama falls back to regex"),
     }
     println!("keyring: stub until v0.3.0");
+    // Cloud chain (#19): report key presence without leaking values.
+    // Missing keys skip that provider, chain degrades to local.
+    println!(
+        "groq key: {}",
+        if std::env::var("GROQ_API_KEY")
+            .map(|k| !k.trim().is_empty())
+            .unwrap_or(false)
+        {
+            "set — chain tries groq, then nim, then local"
+        } else {
+            "missing — groq skipped, chain tries nim, then local"
+        }
+    );
+    println!(
+        "nim key: {}",
+        if std::env::var("NVIDIA_NIM_API_KEY")
+            .map(|k| !k.trim().is_empty())
+            .unwrap_or(false)
+        {
+            "set — chain includes nim before local"
+        } else {
+            "missing — nim skipped, chain ends at local"
+        }
+    );
     Ok(())
 }
 
@@ -476,21 +500,54 @@ fn run_utterance(opts: &ListenOpts, tickets: &TicketRegistry) -> anyhow::Result<
     }
 
     // STT (dictionary phrases boost whisper via initial prompt, #15).
+    // Cloud chain in v0.3.0 (#19): Groq, then NIM, then local guarantee.
+    // Missing keys skip that provider, failures fall back to local.
     let model_path = resolve_model(&opts.model);
     let dict_prompt = susurro_storage::SqliteDictionary::open(&db_path)
         .map(|d| d.prompt().unwrap_or_default())
         .unwrap_or_default();
     let mock_stt;
     let real_stt;
+    let chain_stt;
+    let chain_ref: Option<&susurro_adapters_stt_cloud::SttFallbackChain>;
     let stt: &dyn SpeechToTextPort = if opts.mock {
         mock_stt = MockSttOnce {
             text: opts.mock_text.clone(),
         };
+        chain_ref = None;
         &mock_stt
     } else {
-        real_stt = susurro_adapters_stt_local::WhisperLocal::base_en(model_path.into())
-            .with_prompt(&dict_prompt);
-        &real_stt
+        let groq_cfg = susurro_adapters_stt_cloud::OpenAiCompatibleConfig::groq_from_env().ok();
+        let nim_cfg = susurro_adapters_stt_cloud::OpenAiCompatibleConfig::nim_from_env().ok();
+        if groq_cfg.is_none() && nim_cfg.is_none() {
+            real_stt = susurro_adapters_stt_local::WhisperLocal::base_en(model_path.into())
+                .with_prompt(&dict_prompt);
+            chain_ref = None;
+            &real_stt
+        } else {
+            let local = susurro_adapters_stt_local::WhisperLocal::base_en(model_path.into())
+                .with_prompt(&dict_prompt);
+            let mut chain = susurro_adapters_stt_cloud::SttFallbackChain::new(Box::new(local));
+            if let Some(cfg) = groq_cfg {
+                chain = chain.add_provider(
+                    "groq",
+                    Box::new(susurro_adapters_stt_cloud::OpenAiCompatibleStt::new(cfg)),
+                    susurro_adapters_stt_cloud::DEFAULT_FAILURE_THRESHOLD,
+                    susurro_adapters_stt_cloud::DEFAULT_COOLDOWN_SECS,
+                );
+            }
+            if let Some(cfg) = nim_cfg {
+                chain = chain.add_provider(
+                    "nim",
+                    Box::new(susurro_adapters_stt_cloud::OpenAiCompatibleStt::new(cfg)),
+                    susurro_adapters_stt_cloud::DEFAULT_FAILURE_THRESHOLD,
+                    susurro_adapters_stt_cloud::DEFAULT_COOLDOWN_SECS,
+                );
+            }
+            chain_stt = chain;
+            chain_ref = Some(&chain_stt);
+            &chain_stt
+        }
     };
 
     // Inject.
@@ -559,17 +616,23 @@ fn run_utterance(opts: &ListenOpts, tickets: &TicketRegistry) -> anyhow::Result<
     eprintln!("cleaned: {}", out.cleaned_text);
 
     // History (#14): idempotent upsert, best-effort so a broken db
-    // never blocks dictation.
+    // never blocks dictation. Chain reports the winning provider (#19).
     let latency_ms = t0.elapsed().as_millis() as u64;
     match susurro_storage::SqliteHistory::open(&db_path) {
         Ok(mut h) => {
             use susurro_core::ports::HistoryStorePort;
-            let provider = if opts.mock { "mock" } else { "local" };
+            let provider = if opts.mock {
+                "mock".to_string()
+            } else if let Some(c) = chain_ref {
+                c.last_provider()
+            } else {
+                "local".to_string()
+            };
             if let Err(e) = h.upsert(susurro_core::ports::HistoryEntry {
                 session,
                 raw_text: out.raw_text.clone(),
                 cleaned_text: Some(out.cleaned_text.clone()),
-                provider: provider.into(),
+                provider,
                 latency_ms,
             }) {
                 eprintln!("history write degraded: {e}");

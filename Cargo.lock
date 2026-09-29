@@ -909,6 +909,7 @@ dependencies = [
  "susurro-adapters-audio",
  "susurro-adapters-cleanup",
  "susurro-adapters-linux",
+ "susurro-adapters-stt-cloud",
  "susurro-adapters-stt-local",
  "susurro-core",
  "susurro-storage",

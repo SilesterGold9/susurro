@@ -12,6 +12,9 @@
 //! Local remains the guarantee, cloud failures return Transcription errors
 //! so the fallback chain in issue 19 can degrade to local.
 
+pub mod chain;
+pub use chain::{SttFallbackChain, DEFAULT_COOLDOWN_SECS, DEFAULT_FAILURE_THRESHOLD};
+
 use susurro_core::ports::{SpeechToTextPort, Transcript};
 use susurro_core::CoreError;
 

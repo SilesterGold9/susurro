@@ -14,6 +14,7 @@ clap.workspace = true
 anyhow.workspace = true
 susurro-adapters-audio = { path = "../adapters-audio" }
 susurro-adapters-stt-local = { path = "../adapters-stt-local" }
+susurro-adapters-stt-cloud = { path = "../adapters-stt-cloud" }
 susurro-adapters-cleanup = { path = "../adapters-cleanup" }
 susurro-adapters-linux = { path = "../adapters-linux" }
 susurro-storage = { path = "../storage" }
