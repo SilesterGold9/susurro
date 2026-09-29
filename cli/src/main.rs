@@ -1,6 +1,7 @@
 use clap::{Parser, Subcommand};
 use susurro_core::ports::{AudioCapturePort, AudioChunk, SpeechToTextPort};
 use susurro_core::{Pipeline, SessionId, TicketRegistry};
+use susurro_adapters_stt_cloud::{host_of, preresolve_host};
 
 #[derive(Parser)]
 #[command(
@@ -771,6 +772,21 @@ fn run_utterance(opts: &ListenOpts, tickets: &TicketRegistry) -> anyhow::Result<
             chain_ref = None;
             &real_stt
         } else {
+            // Pre-warm the cloud chain: resolve hosts, build clients, and check DNS before
+            // entering the VAD pause. This way failures land on the first transcription
+            // attempt, not in the middle of a dictation session.
+            if let Some(ref cfg) = groq_cfg {
+                let host = susurro_adapters_stt_cloud::host_of(&cfg.base_url);
+                if let Some(h) = host {
+                    let _ips = susurro_adapters_stt_cloud::preresolve_host(&h).ok();
+                }
+            }
+            if let Some(ref cfg) = nim_cfg {
+                let host = susurro_adapters_stt_cloud::host_of(&cfg.base_url);
+                if let Some(h) = host {
+                    let _ips = susurro_adapters_stt_cloud::preresolve_host(&h).ok();
+                }
+            }
             let local = susurro_adapters_stt_local::WhisperLocal::base_en(model_path.into())
                 .with_prompt(&dict_prompt);
             let mut chain = susurro_adapters_stt_cloud::SttFallbackChain::new(Box::new(local));

@@ -13,8 +13,10 @@
 //! so the fallback chain in issue 19 can degrade to local.
 
 pub mod chain;
+pub mod http;
 pub mod network;
 pub use chain::{SttFallbackChain, DEFAULT_COOLDOWN_SECS, DEFAULT_FAILURE_THRESHOLD};
+pub use http::{host_of, pooled_client, preresolve_host};
 pub use network::NetworkStatus;
 
 use susurro_core::ports::{SpeechToTextPort, Transcript};
@@ -105,11 +107,14 @@ impl OpenAiCompatibleConfig {
 
 pub struct OpenAiCompatibleStt {
     config: OpenAiCompatibleConfig,
+    client: reqwest::blocking::Client,
 }
 
 impl OpenAiCompatibleStt {
     pub fn new(config: OpenAiCompatibleConfig) -> Self {
-        Self { config }
+        let client = http::pooled_client(config.timeout_secs)
+            .expect("HTTP client builds from validated timeout");
+        Self { config, client }
     }
 
     pub fn config(&self) -> &OpenAiCompatibleConfig {
@@ -119,7 +124,7 @@ impl OpenAiCompatibleStt {
 
 impl SpeechToTextPort for OpenAiCompatibleStt {
     fn transcribe(&self, pcm: &[i16]) -> Result<Transcript, CoreError> {
-        transcribe_via_curl(&self.config, pcm)
+        transcribe_pooled(&self.config, &self.client, pcm)
     }
 
     fn model_name(&self) -> &str {
@@ -127,45 +132,25 @@ impl SpeechToTextPort for OpenAiCompatibleStt {
     }
 }
 
-fn transcribe_via_curl(
+fn transcribe_pooled(
     config: &OpenAiCompatibleConfig,
+    client: &reqwest::blocking::Client,
     pcm: &[i16],
 ) -> Result<Transcript, CoreError> {
     if pcm.is_empty() {
         return Err(CoreError::Transcription("empty audio".into()));
     }
+    // No temp file: the WAV travels straight from memory into the
+    // pooled multipart POST, reusing the warm connection.
     let wav = encode_wav_16k_mono(pcm);
-    let tmp = std::env::temp_dir().join(format!(
-        "susurro-cloud-{}.wav",
-        susurro_core::SessionId::generate()
-    ));
-    std::fs::write(&tmp, &wav)
-        .map_err(|e| CoreError::Transcription(format!("temp write failed: {e}")))?;
-    let out = run_curl(config, &tmp);
-    let _ = std::fs::remove_file(&tmp);
-    let stdout = match out {
-        Ok(o) if o.status.success() => o.stdout,
-        Ok(o) => {
-            let detail = String::from_utf8_lossy(&o.stderr).trim().to_string();
-            let short = truncate(&detail, 200);
-            if short.is_empty() {
-                return Err(CoreError::Transcription(format!(
-                    "cloud STT failed for model {}. Using local instead",
-                    config.model
-                )));
-            }
-            return Err(CoreError::Transcription(format!(
-                "cloud STT failed for model {}. Using local instead: {short}",
-                config.model
-            )));
-        }
-        Err(e) => {
-            return Err(CoreError::Transcription(format!(
-                "Couldn't run curl (is curl installed?): {e}. Using local instead"
-            )));
-        }
-    };
-    let text = parse_transcription_response(&stdout)
+    let body = http::post_transcription(
+        client,
+        &config.endpoint(),
+        &config.api_key,
+        &config.model,
+        wav,
+    )?;
+    let text = parse_transcription_response(&body)
         .map_err(|e| CoreError::Transcription(format!("{e}. Using local instead")))?;
     if text.trim().is_empty() {
         return Err(CoreError::Transcription(format!(
@@ -177,43 +162,6 @@ fn transcribe_via_curl(
         text,
         is_partial: false,
     })
-}
-
-fn run_curl(
-    config: &OpenAiCompatibleConfig,
-    wav_path: &std::path::Path,
-) -> std::io::Result<std::process::Output> {
-    let args = build_curl_args(config, wav_path);
-    let mut cmd = std::process::Command::new("curl");
-    cmd.args(&args);
-    cmd.output()
-}
-
-/// Build curl argv without embedding the key in a loggable string.
-/// The header value is assembled here and passed as one argv entry.
-fn build_curl_args(config: &OpenAiCompatibleConfig, wav_path: &std::path::Path) -> Vec<String> {
-    let file_arg = format!("file=@{};type=audio/wav", wav_path.display());
-    let model_arg = format!("model={}", config.model);
-    vec![
-        "-sS".into(),
-        "-m".into(),
-        config.timeout_secs.to_string(),
-        "-X".into(),
-        "POST".into(),
-        config.endpoint(),
-        "-H".into(),
-        format!("Authorization: Bearer {}", config.api_key),
-        "-F".into(),
-        file_arg,
-        "-F".into(),
-        model_arg,
-        "-F".into(),
-        "response_format=json".into(),
-        "-F".into(),
-        "language=en".into(),
-        "-F".into(),
-        "temperature=0".into(),
-    ]
 }
 
 fn parse_transcription_response(body: &[u8]) -> Result<String, String> {
