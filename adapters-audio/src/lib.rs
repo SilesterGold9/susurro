@@ -417,6 +417,39 @@ impl susurro_core::ports::VoiceActivityDetectorPort for EnergyVad {
     }
 }
 
+/// Scripted VAD for tests and CI: replays a bool answer queue for
+/// `is_speech`. An empty queue reads false and never panics.
+pub struct MockVad {
+    answers: std::sync::Mutex<std::collections::VecDeque<bool>>,
+}
+
+impl MockVad {
+    /// Answers to replay, one per `is_speech` call, in call order.
+    pub fn new(answers: Vec<bool>) -> Self {
+        Self {
+            answers: std::sync::Mutex::new(answers.into()),
+        }
+    }
+}
+
+impl susurro_core::ports::VoiceActivityDetectorPort for MockVad {
+    fn is_speech(&self, _samples: &[i16]) -> bool {
+        self.answers.lock().unwrap().pop_front().unwrap_or(false)
+    }
+
+    fn end_of_speech(&self, _samples: &[i16]) -> bool {
+        // Peek without consuming: daemon loops call `is_speech` then
+        // `end_of_speech` per chunk, so consuming here would advance
+        // the script twice per chunk and desync the test.
+        self.answers
+            .lock()
+            .unwrap()
+            .front()
+            .copied()
+            .unwrap_or(false)
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum EndpointDecision {
     Continue,
@@ -1032,6 +1065,32 @@ fn resample_f32_to_s16_16k(input: &[f32], src_rate: u32) -> Vec<i16> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn mock_vad_replays_answer_queue() {
+        use susurro_core::ports::VoiceActivityDetectorPort;
+        let vad = MockVad::new(vec![true, false]);
+        assert!(vad.is_speech(&[1, 2, 3]));
+        assert!(!vad.is_speech(&[1, 2, 3]));
+    }
+
+    #[test]
+    fn mock_vad_empty_queue_reads_false() {
+        use susurro_core::ports::VoiceActivityDetectorPort;
+        let vad = MockVad::new(vec![]);
+        assert!(!vad.is_speech(&[1, 2, 3]));
+        assert!(!vad.end_of_speech(&[1, 2, 3]));
+    }
+
+    #[test]
+    fn mock_vad_end_of_speech_peeks_without_consuming() {
+        use susurro_core::ports::VoiceActivityDetectorPort;
+        let vad = MockVad::new(vec![true]);
+        assert!(vad.end_of_speech(&[0]));
+        assert!(vad.end_of_speech(&[0]));
+        assert!(vad.is_speech(&[0]));
+        assert!(!vad.is_speech(&[0]));
+    }
 
     #[test]
     fn mock_returns_silence_then_ends() {

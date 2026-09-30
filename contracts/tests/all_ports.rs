@@ -184,6 +184,39 @@ fn mock_hotkey_answers_toggle() {
 }
 
 #[test]
+fn scripted_hotkey_replays_press_queue() {
+    use susurro_core::ports::HotkeyEvent;
+    let hotkey = susurro_adapters_linux::ScriptedHotkey::new(vec![HotkeyEvent::ToggleDictation]);
+    c::check_hotkey_mock_returns_toggle(&hotkey);
+}
+
+#[test]
+fn recording_overlay_records_pipeline() {
+    use susurro_core::ports::OverlayState;
+    let overlay = c::RecordingOverlay::new();
+    c::check_overlay_accepts_all(&overlay);
+    let seen = overlay.takes();
+    assert_eq!(seen.len(), 15);
+    assert!(seen
+        .iter()
+        .any(|(s, _)| matches!(s, OverlayState::Listening)));
+    assert!(overlay.takes().is_empty());
+}
+
+#[test]
+fn mock_network_fixed_states_resolve() {
+    use susurro_adapters_stt_cloud::MockNetwork;
+    use susurro_core::ports::NetworkState;
+    c::check_network_resolves(&MockNetwork::new(NetworkState::Online));
+    c::check_network_resolves(&MockNetwork::new(NetworkState::Offline));
+}
+
+#[test]
+fn mock_vad_scripted_answers_separate() {
+    c::check_vad_separates(&susurro_adapters_audio::MockVad::new(vec![true, false]));
+}
+
+#[test]
 fn null_overlay_accepts_everything() {
     c::check_overlay_accepts_all(&c::NullOverlay);
 }

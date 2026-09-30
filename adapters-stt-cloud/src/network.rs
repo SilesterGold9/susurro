@@ -78,6 +78,35 @@ impl NetworkStatusPort for NetworkStatus {
     }
 }
 
+/// Fixed-state network double for tests and CI: always returns the
+/// state it was constructed with, with no socket and no env reads.
+pub struct MockNetwork {
+    state: NetworkState,
+}
+
+impl MockNetwork {
+    /// Fixed answer for every `status` call.
+    pub fn new(state: NetworkState) -> Self {
+        Self { state }
+    }
+
+    /// Always-online double.
+    pub fn online() -> Self {
+        Self::new(NetworkState::Online)
+    }
+
+    /// Always-offline double.
+    pub fn offline() -> Self {
+        Self::new(NetworkState::Offline)
+    }
+}
+
+impl NetworkStatusPort for MockNetwork {
+    fn status(&self) -> NetworkState {
+        self.state
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -111,6 +140,30 @@ mod tests {
         ));
         assert!(NetworkStatus::new().is_online());
         std::env::remove_var("SUSURRO_ONLINE");
+    }
+
+    #[test]
+    fn mock_network_online_returns_online() {
+        assert!(matches!(
+            MockNetwork::new(NetworkState::Online).status(),
+            NetworkState::Online
+        ));
+        assert!(matches!(
+            MockNetwork::online().status(),
+            NetworkState::Online
+        ));
+    }
+
+    #[test]
+    fn mock_network_offline_returns_offline() {
+        assert!(matches!(
+            MockNetwork::new(NetworkState::Offline).status(),
+            NetworkState::Offline
+        ));
+        assert!(matches!(
+            MockNetwork::offline().status(),
+            NetworkState::Offline
+        ));
     }
 
     #[test]

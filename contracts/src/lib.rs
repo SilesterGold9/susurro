@@ -38,6 +38,39 @@ impl OverlayRendererPort for NullOverlay {
     fn render(&self, _state: OverlayState, _amplitude: f32) {}
 }
 
+/// Recording overlay for tests and CI: stores every render call as
+/// a state plus amplitude pair behind a mutex. `takes` drains the
+/// log so assertions read what the pipeline showed.
+pub struct RecordingOverlay {
+    seen: std::sync::Mutex<Vec<(OverlayState, f32)>>,
+}
+
+impl RecordingOverlay {
+    /// Empty recording log.
+    pub fn new() -> Self {
+        Self {
+            seen: std::sync::Mutex::new(Vec::new()),
+        }
+    }
+
+    /// Drain recorded pairs, oldest first, leaving the log empty.
+    pub fn takes(&self) -> Vec<(OverlayState, f32)> {
+        std::mem::take(&mut *self.seen.lock().unwrap())
+    }
+}
+
+impl Default for RecordingOverlay {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl OverlayRendererPort for RecordingOverlay {
+    fn render(&self, state: OverlayState, amplitude: f32) {
+        self.seen.lock().unwrap().push((state, amplitude));
+    }
+}
+
 /// STT reports a transcript or an actionable error, never empty Ok
 /// and never a partial flagged final. `pcm` is input, not fixture:
 /// callers pass speech-like audio; mocks ignore it, real adapters
@@ -156,5 +189,32 @@ pub fn check_overlay_accepts_all(renderer: &dyn OverlayRendererPort) {
         for amplitude in [0.0, 0.5, 1.0, 2.0, f32::NAN] {
             renderer.render(state, amplitude);
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn recording_overlay_records_renders() {
+        let overlay = RecordingOverlay::new();
+        overlay.render(OverlayState::Listening, 0.5);
+        overlay.render(OverlayState::Processing, 1.0);
+        let seen = overlay.takes();
+        assert_eq!(seen.len(), 2);
+        assert!(matches!(seen[0].0, OverlayState::Listening));
+        assert_eq!(seen[0].1, 0.5);
+        assert!(matches!(seen[1].0, OverlayState::Processing));
+    }
+
+    #[test]
+    fn recording_overlay_takes_drains_log() {
+        let overlay = RecordingOverlay::new();
+        overlay.render(OverlayState::Idle, 0.0);
+        assert_eq!(overlay.takes().len(), 1);
+        assert!(overlay.takes().is_empty());
+        overlay.render(OverlayState::Idle, 0.25);
+        assert_eq!(overlay.takes().len(), 1);
     }
 }

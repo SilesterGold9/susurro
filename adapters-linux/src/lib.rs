@@ -182,6 +182,33 @@ impl TextInjectionPort for LinuxPasteInjector {
     }
 }
 
+/// Scripted hotkey for tests and CI: replays a press queue in order.
+/// Each `wait_for_hotkey` pops one press. An empty queue returns a
+/// config error so daemon loops stay deterministic in tests.
+pub struct ScriptedHotkey {
+    presses: std::sync::Mutex<std::collections::VecDeque<HotkeyEvent>>,
+}
+
+impl ScriptedHotkey {
+    /// Queue of presses to replay, in call order.
+    pub fn new(presses: Vec<HotkeyEvent>) -> Self {
+        Self {
+            presses: std::sync::Mutex::new(presses.into()),
+        }
+    }
+}
+
+impl GlobalHotkeyPort for ScriptedHotkey {
+    fn wait_for_hotkey(&self) -> Result<HotkeyEvent, CoreError> {
+        self.presses.lock().unwrap().pop_front().ok_or_else(|| {
+            CoreError::Config(
+                "hotkey press queue is empty. Construct ScriptedHotkey with more presses, then retry."
+                    .into(),
+            )
+        })
+    }
+}
+
 /// Hardware-free injector for tests: records what would be pasted.
 pub struct MockInjector {
     pub seen: std::sync::Mutex<Vec<String>>,
@@ -242,6 +269,35 @@ pub fn parse_active_window_class(json: &str) -> Option<String> {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn scripted_hotkey_replays_queue_in_order() {
+        use super::ScriptedHotkey;
+        use susurro_core::ports::{GlobalHotkeyPort, HotkeyEvent};
+        let hotkey = ScriptedHotkey::new(vec![
+            HotkeyEvent::ToggleDictation,
+            HotkeyEvent::ToggleDictation,
+        ]);
+        assert!(matches!(
+            super::GlobalHotkeyPort::wait_for_hotkey(&hotkey).unwrap(),
+            HotkeyEvent::ToggleDictation
+        ));
+        assert!(matches!(
+            GlobalHotkeyPort::wait_for_hotkey(&hotkey).unwrap(),
+            HotkeyEvent::ToggleDictation
+        ));
+        assert!(GlobalHotkeyPort::wait_for_hotkey(&hotkey).is_err());
+    }
+
+    #[test]
+    fn scripted_hotkey_empty_queue_errors_actionably() {
+        use susurro_core::ports::GlobalHotkeyPort;
+        let hotkey = super::ScriptedHotkey::new(vec![]);
+        let err = GlobalHotkeyPort::wait_for_hotkey(&hotkey).unwrap_err();
+        let msg = err.to_string();
+        assert!(msg.contains("press queue is empty"), "{msg}");
+        assert!(msg.contains("then retry"), "{msg}");
+    }
+
     #[test]
     fn parses_hyprland_active_window() {
         let sample = r#"{"address":"0x1234","class":"kitty","title":"shell"}"#;
