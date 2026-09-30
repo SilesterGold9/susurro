@@ -361,8 +361,154 @@ fn cloud_config(
     susurro_adapters_stt_cloud::OpenAiCompatibleConfig::new(base_url, model, &key).ok()
 }
 
+/// True when a live ydotoold process entry exists under `proc_dir`.
+/// Pure over the dir path so tests use temp dirs; the live path passes
+/// /proc on Linux. Matches comm exactly, falls back to cmdline argv.
+fn ydotoold_running_in(proc_dir: &std::path::Path) -> bool {
+    let entries = match std::fs::read_dir(proc_dir) {
+        Ok(e) => e,
+        Err(_) => return false,
+    };
+    for entry in entries.flatten() {
+        let name = entry.file_name();
+        let name = name.to_string_lossy();
+        if !name.bytes().all(|b| b.is_ascii_digit()) {
+            continue;
+        }
+        if let Ok(comm) = std::fs::read_to_string(entry.path().join("comm")) {
+            if comm.trim() == "ydotoold" {
+                return true;
+            }
+        }
+        if let Ok(cmd) = std::fs::read(entry.path().join("cmdline")) {
+            let text = String::from_utf8_lossy(&cmd);
+            if text
+                .split('\0')
+                .any(|p| p == "ydotoold" || p.ends_with("/ydotoold"))
+            {
+                return true;
+            }
+        }
+    }
+    false
+}
+
+/// Live ydotoold check: process scan on Linux, binary presence elsewhere.
+fn ydotoold_running() -> bool {
+    #[cfg(target_os = "linux")]
+    {
+        ydotoold_running_in(std::path::Path::new("/proc"))
+    }
+    #[cfg(not(target_os = "linux"))]
+    {
+        which("ydotool")
+    }
+}
+
+/// Pull the version number out of `whisper-cli --version` output: the
+/// first digit-led dotted token, if any.
+fn parse_whisper_version(output: &str) -> Option<String> {
+    for token in output.split(|c: char| {
+        c.is_whitespace() || c == ',' || c == '(' || c == ')' || c == '[' || c == ']'
+    }) {
+        let t = token.trim_start_matches('v');
+        let first = match t.chars().next() {
+            Some(c) => c,
+            None => continue,
+        };
+        if !first.is_ascii_digit() {
+            continue;
+        }
+        let dots = t.bytes().filter(|&b| b == b'.').count();
+        let digits = t.bytes().filter(|b| b.is_ascii_digit()).count();
+        if dots >= 1 && digits >= 2 {
+            let clean: String = t
+                .trim_matches(|c: char| !c.is_alphanumeric() && c != '.' && c != '-')
+                .to_string();
+            if !clean.is_empty() {
+                return Some(clean);
+            }
+        }
+    }
+    None
+}
+
+/// Best-effort `whisper-cli --version` probe. None when the binary is
+/// missing or its output carries no version token.
+fn whisper_cli_version() -> Option<String> {
+    let out = std::process::Command::new("whisper-cli")
+        .arg("--version")
+        .output()
+        .ok()?;
+    let mut combined = String::from_utf8_lossy(&out.stdout).into_owned();
+    combined.push_str(&String::from_utf8_lossy(&out.stderr));
+    parse_whisper_version(&combined)
+}
+
+/// Per-tier model files on disk. Paths match resolve_model_with so the
+/// report and the resolver agree. `home` stands in for $HOME in tests.
+fn tier_model_status(home: Option<&str>) -> Vec<(&'static str, bool)> {
+    let present = |file: &str| match home {
+        Some(h) => std::path::PathBuf::from(h)
+            .join(".local/share/susurro/models")
+            .join(file)
+            .exists(),
+        None => false,
+    };
+    vec![
+        ("tiny", present("tiny.en.bin")),
+        ("base", present("base.en.bin")),
+        ("small", present("small.en.bin")),
+    ]
+}
+
+/// Audio server from tool presence. PipeWire wins when pw-record exists,
+/// PulseAudio when only parecord does, platform default otherwise.
+fn audio_server_name(present: impl Fn(&str) -> bool) -> &'static str {
+    if present("pw-record") {
+        "PipeWire"
+    } else if present("parecord") {
+        "PulseAudio"
+    } else if cfg!(target_os = "windows") {
+        "Windows default"
+    } else {
+        "cpal fallback"
+    }
+}
+
+/// Hyprland session from the compositor signature env value. Empty or
+/// missing means no Hyprland session.
+fn hyprland_present(signature: Option<&str>) -> bool {
+    matches!(signature, Some(s) if !s.trim().is_empty())
+}
+
+/// Model names out of an Ollama /api/tags body. Manual scan: the CLI
+/// ships no JSON dependency and doctor only needs the name fields.
+fn ollama_model_names(body: &str) -> Vec<String> {
+    let mut names = Vec::new();
+    let mut search = body;
+    while let Some(pos) = search.find("\"name\"") {
+        let rest = &search[pos + 6..];
+        let Some(colon) = rest.find(':') else {
+            break;
+        };
+        let after = rest[colon + 1..].trim_start();
+        let Some(s) = after.strip_prefix('"') else {
+            search = &rest[colon + 1..];
+            continue;
+        };
+        let Some(end) = s.find('"') else {
+            break;
+        };
+        names.push(s[..end].to_string());
+        search = &s[end + 1..];
+    }
+    names
+}
+
 fn doctor() -> anyhow::Result<()> {
     println!("Susurro doctor (v{})", env!("CARGO_PKG_VERSION"));
+    println!("audio:");
     match susurro_adapters_audio::default_input_name() {
         Some(name) => println!("mic: found ({name})"),
         None => println!("mic: missing — check input device and permissions"),
@@ -382,7 +528,7 @@ fn doctor() -> anyhow::Result<()> {
     }
     let devices = susurro_adapters_audio::list_input_devices();
     if devices.is_empty() {
-        println!("mic devices: none");
+        println!("mic devices: none — check input device and permissions");
     } else {
         println!("mic devices:");
         for d in &devices {
@@ -390,6 +536,13 @@ fn doctor() -> anyhow::Result<()> {
         }
         println!("select with: listen --device <name-substring>");
     }
+    let server = audio_server_name(which);
+    if server == "PipeWire" || server == "PulseAudio" || cfg!(target_os = "windows") {
+        println!("audio server: {server}");
+    } else {
+        println!("audio server: {server} — install pw-record or parecord for device routing");
+    }
+    println!("tools:");
     for tool in [
         "pw-record",
         "parecord",
@@ -413,6 +566,39 @@ fn doctor() -> anyhow::Result<()> {
             }
         );
     }
+    match whisper_cli_version() {
+        Some(v) => println!("whisper-cli version: {v}"),
+        None => {
+            println!("whisper-cli version: unknown — install a whisper-cli that reports --version")
+        }
+    }
+    #[cfg(target_os = "linux")]
+    println!(
+        "ydotoold daemon: {}",
+        if ydotoold_running() {
+            "running"
+        } else {
+            "not running — start it with sudo ydotoold"
+        }
+    );
+    #[cfg(not(target_os = "linux"))]
+    println!(
+        "ydotoold daemon: {}",
+        if which("ydotool") {
+            "binary present (running state is Linux-only)"
+        } else {
+            "missing — see README"
+        }
+    );
+    println!(
+        "hyprland session: {}",
+        if hyprland_present(std::env::var("HYPRLAND_INSTANCE_SIGNATURE").ok().as_deref()) {
+            "present"
+        } else {
+            "absent — Hyprland-only features stay off, no action needed elsewhere"
+        }
+    );
+    println!("model:");
     let model = resolve_model(&None);
     println!(
         "model ({model}): {}",
@@ -426,6 +612,26 @@ fn doctor() -> anyhow::Result<()> {
         Some(t) => println!("bench tier: {} ({})", t.as_str(), t.file_name()),
         None => println!("bench tier: unset — first listen benchmarks, or run susurro bench"),
     };
+    let home = std::env::var("HOME")
+        .or_else(|_| std::env::var("USERPROFILE"))
+        .ok();
+    for (tier, present) in tier_model_status(home.as_deref()) {
+        let file = match tier {
+            "tiny" => "tiny.en.bin",
+            "base" => "base.en.bin",
+            _ => "small.en.bin",
+        };
+        println!(
+            "model {tier} ({file}): {}",
+            if present {
+                "found"
+            } else {
+                "missing — download it to enable the tier"
+            }
+        );
+    }
+    println!("model checksums: unverified — checksum verification lands with issue 45");
+    println!("compute:");
     // Compute runtimes (v0.5.0, issue 29): everything the backend
     // selection depends on, in one place. Each line names the fact
     // and the fix direction; nothing here blocks dictation.
@@ -482,7 +688,7 @@ fn doctor() -> anyhow::Result<()> {
         );
         println!("auto backend: {}", auto_backend.describe());
     }
-    println!("socket: /tmp/susurro.sock (Hyprland bind triggers it)");
+    println!("cloud keys:");
     // Best-effort Ollama server + model probe for --cleanup ollama.
     match std::process::Command::new("curl")
         .args(["-sS", "-m", "5", "http://localhost:11434/api/tags"])
@@ -490,17 +696,26 @@ fn doctor() -> anyhow::Result<()> {
     {
         Ok(o) if o.status.success() => {
             let body = String::from_utf8_lossy(&o.stdout);
+            let names = ollama_model_names(&body);
             println!("ollama server: up");
+            if names.is_empty() {
+                println!("ollama models: none pulled — ollama pull qwen3:0.6b for cleanup");
+            } else {
+                println!("ollama models: pulled ({})", names.join(", "));
+            }
             println!(
                 "ollama model qwen3:0.6b: {}",
-                if body.contains("qwen3:0.6b") {
+                if names.iter().any(|n| n == "qwen3:0.6b") {
                     "pulled"
                 } else {
                     "missing — ollama pull qwen3:0.6b"
                 }
             );
         }
-        _ => println!("ollama server: down — --cleanup ollama falls back to regex"),
+        _ => {
+            println!("ollama server: down — --cleanup ollama falls back to regex");
+            println!("ollama models: unknown — start the server to list pulled models");
+        }
     }
     // Cloud keys (#20): keyring first, env override. Sources named,
     // values never printed. Missing keys skip that provider.
@@ -546,25 +761,28 @@ fn doctor() -> anyhow::Result<()> {
         );
     }
     // Privacy policy (#21): blocklisted apps force local-only.
+    println!("privacy:");
     match susurro_storage::SqlitePrivacy::open(&db_path()) {
         Ok(store) => match store.list() {
             Ok(apps) => println!(
                 "privacy policy: {} local-only apps (password managers, terminals). Manage with privacy-add, privacy-remove, privacy-list",
                 apps.len()
             ),
-            Err(e) => println!("privacy policy: degraded ({e})"),
+            Err(e) => println!("privacy policy: degraded ({e}) — check db permissions"),
         },
-        Err(e) => println!("privacy policy: degraded ({e})"),
+        Err(e) => println!("privacy policy: degraded ({e}) — check db permissions"),
     }
     #[cfg(target_os = "linux")]
     println!(
         "focused app: {}",
         susurro_adapters_linux::focused_app()
             .as_deref()
-            .unwrap_or("unknown")
+            .unwrap_or("unknown — privacy routing treats it as not blocklisted")
     );
     #[cfg(not(target_os = "linux"))]
     println!("focused app: detection is Linux-only");
+    println!("injection:");
+    println!("socket: /tmp/susurro.sock (Hyprland bind triggers it)");
     #[cfg(target_os = "windows")]
     println!("inject: SendInput unicode direct-type (clipboard preserved)");
     #[cfg(not(target_os = "windows"))]
@@ -1605,5 +1823,99 @@ mod tests {
         let out = resolve_model_with(&None, None, None, Some(&h));
         assert!(out.ends_with("base.en.bin"), "{out}");
         let _ = std::fs::remove_dir_all(&home);
+    }
+
+    fn proc_with(comms: &[(&str, &str)]) -> std::path::PathBuf {
+        let dir = std::env::temp_dir().join(format!(
+            "susurro-test-proc-{}",
+            susurro_core::SessionId::generate()
+        ));
+        for (pid, comm) in comms {
+            let pid_dir = dir.join(pid);
+            std::fs::create_dir_all(&pid_dir).unwrap();
+            std::fs::write(pid_dir.join("comm"), comm.as_bytes()).unwrap();
+        }
+        dir
+    }
+
+    #[test]
+    fn ydotoold_scan_finds_comm_match() {
+        let proc = proc_with(&[("101", "other\n"), ("202", "ydotoold\n")]);
+        assert!(ydotoold_running_in(&proc));
+        let _ = std::fs::remove_dir_all(&proc);
+    }
+
+    #[test]
+    fn ydotoold_scan_empty_dir_is_false() {
+        let proc = proc_with(&[("101", "other\n")]);
+        assert!(!ydotoold_running_in(&proc));
+        let missing = proc.join("does-not-exist");
+        assert!(!ydotoold_running_in(&missing));
+        let _ = std::fs::remove_dir_all(&proc);
+    }
+
+    #[test]
+    fn whisper_version_extracts_number() {
+        assert_eq!(
+            parse_whisper_version("whisper.cpp version 1.7.4 (abc)"),
+            Some("1.7.4".into())
+        );
+        assert_eq!(parse_whisper_version("v2.0.1"), Some("2.0.1".into()));
+    }
+
+    #[test]
+    fn whisper_version_empty_is_none() {
+        assert_eq!(parse_whisper_version(""), None);
+        assert_eq!(parse_whisper_version("no version here"), None);
+    }
+
+    #[test]
+    fn tier_status_reports_per_file() {
+        let home = home_with(&["tiny.en.bin", "base.en.bin"]);
+        let h = home.to_string_lossy().into_owned();
+        let status = tier_model_status(Some(&h));
+        assert_eq!(
+            status,
+            vec![("tiny", true), ("base", true), ("small", false)]
+        );
+        assert!(tier_model_status(None).iter().all(|(_, p)| !p));
+        let _ = std::fs::remove_dir_all(&home);
+    }
+
+    #[test]
+    fn audio_server_prefers_pipewire_over_pulse() {
+        assert_eq!(audio_server_name(|_| true), "PipeWire");
+        assert_eq!(audio_server_name(|t| t == "parecord"), "PulseAudio");
+    }
+
+    #[test]
+    fn audio_server_falls_back_without_tools() {
+        let server = audio_server_name(|_| false);
+        assert!(
+            server == "cpal fallback" || server == "Windows default",
+            "{server}"
+        );
+    }
+
+    #[test]
+    fn hyprland_needs_nonempty_signature() {
+        assert!(hyprland_present(Some("abc123")));
+        assert!(!hyprland_present(None));
+        assert!(!hyprland_present(Some("   ")));
+    }
+
+    #[test]
+    fn ollama_names_extracts_models() {
+        let body = r#"{"models":[{"name":"qwen3:0.6b","size":1},{"name":"llama3:8b","size":2}]}"#;
+        assert_eq!(
+            ollama_model_names(body),
+            vec!["qwen3:0.6b".to_string(), "llama3:8b".to_string()]
+        );
+    }
+
+    #[test]
+    fn ollama_names_empty_body_is_empty() {
+        assert!(ollama_model_names("").is_empty());
+        assert!(ollama_model_names(r#"{"models":[]}"#).is_empty());
     }
 }
