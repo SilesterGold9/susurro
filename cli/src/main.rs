@@ -244,8 +244,8 @@ fn main() -> anyhow::Result<()> {
             println!("    match:class = ^(susurro-app)$");
             println!("    match:title = ^(Susurro)$");
             println!("    float = true");
-            println!("    size = 420 72");
-            println!("    move = (monitor_w-420)/2 (monitor_h*0.92)");
+            println!("    size = 360 64");
+            println!("    move = (monitor_w-360)/2 (monitor_h*0.92)");
             println!("    pin = true");
             println!("    border_size = 0");
             println!("    rounding = 18");

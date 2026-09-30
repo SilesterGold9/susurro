@@ -33,10 +33,10 @@ html { background: transparent; }
 }
 .brand-wordmark .comma { color: var(--coral); }
 
-/* Floating pill: the window is exactly 420x72, so the pill is centered
+/* Floating pill: the window is exactly 360x64, so the pill is centered
    in the viewport (symmetric gutters) and its shadow stays small enough
    to render inside the transparent window instead of clipping at the edge,
-   which reads as a seam. Pill is 396 wide (12px side gutters) and 58 tall
+   which reads as a seam. Pill is 336 wide (12px side gutters) and 50 tall
    (7px top and bottom gutters); the single shadow reaches at most 7px. */
 .pill-wrap {
   display: flex;
@@ -50,15 +50,25 @@ html { background: transparent; }
   display: flex;
   align-items: center;
   gap: 10px;
-  width: 396px;
-  min-height: 58px;
-  padding: 10px 14px;
+  width: 336px;
+  min-height: 50px;
+  padding: 8px 14px;
   background: var(--surface-dark);
   color: var(--text-dark);
   border-radius: 18px;
   border: 1px solid rgba(255, 255, 255, 0.08);
   box-shadow: 0 1px 6px rgba(0, 0, 0, 0.35);
   user-select: none;
+  touch-action: none;
+  cursor: grab;
+}
+/* Press feedback: the pill squishes a hair while held, proving the
+   press landed before any move begins. Killed under reduced motion. */
+.pill:active {
+  transform: scale(0.99);
+}
+.pill:active.settle {
+  animation: none;
 }
 @media (prefers-color-scheme: light) {
   .pill {
@@ -72,8 +82,8 @@ html { background: transparent; }
    identity. Listening pulses and processing breathes on opacity;
    done and error hold still. */
 .avatar {
-  width: 34px;
-  height: 34px;
+  width: 32px;
+  height: 32px;
   border-radius: 50%;
   flex: none;
   display: flex;
@@ -84,8 +94,8 @@ html { background: transparent; }
   position: relative;
 }
 .avatar img {
-  width: 30px;
-  height: 30px;
+  width: 28px;
+  height: 28px;
   display: block;
 }
 /* Thought bubble: the focused app's initial riding above the blob
@@ -93,14 +103,14 @@ html { background: transparent; }
    in on appear. Pure identity, never state. */
 .thought {
   position: absolute;
-  left: -6px;
-  top: -12px;
-  width: 18px;
-  height: 18px;
+  left: -8px;
+  top: -16px;
+  width: 24px;
+  height: 24px;
   border-radius: 50%;
   background: var(--surface-light);
   color: var(--text-light);
-  font-size: 10px;
+  font-size: 13px;
   font-weight: 700;
   display: flex;
   align-items: center;
@@ -117,10 +127,10 @@ html { background: transparent; }
 .thought::after {
   content: "";
   position: absolute;
-  left: 4px;
-  bottom: -3px;
-  width: 6px;
-  height: 6px;
+  left: 5px;
+  bottom: -4px;
+  width: 8px;
+  height: 8px;
   border-radius: 50%;
   background: inherit;
 }
@@ -229,6 +239,7 @@ html { background: transparent; }
   .rdigit-col { transition: none; }
   .flash { animation: none; }
   .thought { animation: none; }
+  .pill:active { transform: none; }
 }
 
 /* Settings window */

@@ -15,8 +15,8 @@ type ProgressTick = { stage: string; value: number };
 
 const SLICES = 48;
 const BARS = 7;
-const WAVE_W = 200;
-const WAVE_H = 30;
+const WAVE_W = 180;
+const WAVE_H = 28;
 const SCALE = 2; // fixed 2x backing store, crisp on hidpi with no layout reads
 const ATTACK_MS = 10;
 const RELEASE_MS = 160;
@@ -428,8 +428,9 @@ export default function Pill() {
   }
 
   function endDrag() {
-    window.removeEventListener("mousemove", onDragMove);
-    window.removeEventListener("mouseup", endDrag);
+    window.removeEventListener("pointermove", onDragMove);
+    window.removeEventListener("pointerup", endDrag);
+    window.removeEventListener("pointercancel", endDrag);
     const d = dragRef.current;
     dragRef.current = null;
     if (!d) return;
@@ -440,7 +441,7 @@ export default function Pill() {
     }
   }
 
-  function onDragMove(e: MouseEvent) {
+  function onDragMove(e: PointerEvent) {
     const d = dragRef.current;
     if (!d) return;
     d.dx += e.clientX - d.lastX;
@@ -450,9 +451,15 @@ export default function Pill() {
     if (!d.raf) d.raf = window.requestAnimationFrame(flushDrag);
   }
 
-  function onDragStart(e: React.MouseEvent) {
+  function onDragStart(e: React.PointerEvent) {
     const startX = e.clientX;
     const startY = e.clientY;
+    // Pointer capture keeps mousemove flowing to the pill even when
+    // the cursor leaves its 64px frame mid-drag. Without it only the
+    // first pixels register and the pill feels glued down.
+    try {
+      e.currentTarget.setPointerCapture(e.pointerId);
+    } catch {}
     void invoke<DragAnchor>("pill_drag_start")
       .then((anchor) => {
         dragRef.current = {
@@ -465,10 +472,17 @@ export default function Pill() {
           dy: 0,
           raf: 0,
         };
-        window.addEventListener("mousemove", onDragMove);
-        window.addEventListener("mouseup", endDrag);
+        window.addEventListener("pointermove", onDragMove);
+        window.addEventListener("pointerup", endDrag);
+        window.addEventListener("pointercancel", endDrag);
       })
-      .catch(() => {
+      .catch((err) => {
+        // Surface the reason in the pill: a silent fallback is what
+        // made the last failure undebuggable. Next run clears it.
+        setFlash({
+          text: `can't drag: ${err instanceof Error ? err.message : String(err)}`.slice(0, 64),
+          key: Date.now(),
+        });
         void getCurrentWindow().startDragging().catch(() => {});
       });
   }
@@ -478,7 +492,7 @@ export default function Pill() {
       <div
         className={`pill state-${state}${state === "done" ? " settle" : ""}`}
         key={settleKey}
-        onMouseDown={onDragStart}
+        onPointerDown={onDragStart}
       >
         <span
           className="avatar"
@@ -488,7 +502,7 @@ export default function Pill() {
           <Blobatar
             ref={gazeRef}
             name={avatarName}
-            size={30}
+            size={28}
             traits={AVATAR_TRAITS}
             expression={state === "processing" ? thinking : idle}
             animate="always"

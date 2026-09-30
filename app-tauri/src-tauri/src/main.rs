@@ -258,10 +258,10 @@ fn show_pill(app: &AppHandle, sound: bool) {
         if let Some(m) = monitor {
             let scale = m.scale_factor();
             let size = m.size().to_logical::<f64>(scale);
-            // Window is 420x72 logical; place center-x, ~92% down.
+            // Window is 360x64 logical; place center-x, ~92% down.
             // Below 768p screens this clips a few pixels; dragging
             // overrides the dock wherever the compositor honors moves.
-            let x = size.width / 2.0 - 420.0 / 2.0;
+            let x = size.width / 2.0 - 360.0 / 2.0;
             let y = size.height * 0.92;
             let _ = w.set_position(tauri::Position::Logical(tauri::LogicalPosition { x, y }));
         } else {
