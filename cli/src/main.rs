@@ -65,6 +65,11 @@ enum Cmd {
         /// speech; display-only, the final decode decides.
         #[arg(long, default_value_t = false)]
         live: bool,
+        /// Compute backend for local STT: auto, cpu, or openvino.
+        /// Auto uses the iGPU encoder when the binary, iGPU, and
+        /// runtime are all present, else CPU. Decoder always CPU.
+        #[arg(long, default_value = "auto")]
+        backend: String,
     },
     /// Wait for the Hyprland hotkey, then run Listen in a loop.
     Daemon {
@@ -98,6 +103,11 @@ enum Cmd {
         /// speech; display-only, the final decode decides.
         #[arg(long, default_value_t = false)]
         live: bool,
+        /// Compute backend for local STT: auto, cpu, or openvino.
+        /// Auto uses the iGPU encoder when the binary, iGPU, and
+        /// runtime are all present, else CPU. Decoder always CPU.
+        #[arg(long, default_value = "auto")]
+        backend: String,
     },
     /// Print Hyprland bind snippet for the hotkey socket.
     HyprlandBind {
@@ -159,6 +169,7 @@ fn main() -> anyhow::Result<()> {
             ollama_model,
             app,
             live,
+            backend,
         } => listen_real(&ListenOpts {
             seconds,
             model,
@@ -171,6 +182,7 @@ fn main() -> anyhow::Result<()> {
             ollama_model,
             app,
             live,
+            backend,
             mock_text: "hello from susurro".into(),
         }),
         Cmd::Daemon {
@@ -186,6 +198,7 @@ fn main() -> anyhow::Result<()> {
             ollama_model,
             app,
             live,
+            backend,
         } => daemon(
             &socket,
             &ListenOpts {
@@ -200,6 +213,7 @@ fn main() -> anyhow::Result<()> {
                 ollama_model,
                 app,
                 live,
+                backend,
                 mock_text: "hello from susurro".into(),
             },
         ),
@@ -255,6 +269,7 @@ struct ListenOpts {
     ollama_model: String,
     app: Option<String>,
     live: bool,
+    backend: String,
     mock_text: String,
 }
 
@@ -610,6 +625,7 @@ fn build_live_decoder(
     opts: &ListenOpts,
     model_path: &str,
     dict_prompt: &str,
+    backend: &susurro_adapters_stt_local::openvino::SttBackend,
 ) -> Option<LiveDecoder> {
     if !opts.live {
         return None;
@@ -621,7 +637,8 @@ fn build_live_decoder(
         }))
     } else {
         let whisper = susurro_adapters_stt_local::WhisperLocal::base_en(model_path.into())
-            .with_prompt(dict_prompt);
+            .with_prompt(dict_prompt)
+            .with_backend(backend.clone());
         Some(LiveDecoder::Windowed(
             susurro_adapters_stt_local::WindowedPartial::new(whisper),
         ))
@@ -703,6 +720,21 @@ fn run_utterance(opts: &ListenOpts, tickets: &TicketRegistry) -> anyhow::Result<
         eprintln!("--live needs Linux auto-stop; ignoring.");
     }
     let cues = susurro_adapters_audio::CuePlayer::new(opts.sound);
+    // Compute backend (v0.5.0, issue 27): validate the flag at the
+    // edge so typos fail fast, detect once per utterance (the binary
+    // flag probe caches per process). Mock runs skip it entirely.
+    let backend_request =
+        susurro_adapters_stt_local::openvino::BackendRequest::parse(&opts.backend)
+            .map_err(|e| anyhow::anyhow!("{e}"))?;
+    let (local_backend, backend_warning) = if opts.mock {
+        (susurro_adapters_stt_local::openvino::SttBackend::Cpu, None)
+    } else {
+        let status = susurro_adapters_stt_local::openvino::detect("whisper-cli");
+        susurro_adapters_stt_local::openvino::resolve(backend_request, &status)
+    };
+    if let Some(w) = &backend_warning {
+        eprintln!("backend: {w}");
+    }
     let mut capture: Box<dyn AudioCapturePort> = if opts.mock {
         Box::new(MockCaptureOnce {
             text_len: 1600,
@@ -711,7 +743,7 @@ fn run_utterance(opts: &ListenOpts, tickets: &TicketRegistry) -> anyhow::Result<
     } else if opts.auto_stop {
         #[cfg(target_os = "linux")]
         {
-            let live = build_live_decoder(opts, &model_path, &dict_prompt);
+            let live = build_live_decoder(opts, &model_path, &dict_prompt, &local_backend);
             let (pcm, _) = record_with_auto_stop(opts, &cues, live.as_ref().map(|d| d.as_stt()))?;
             Box::new(started_buffer(pcm)?)
         }
@@ -809,7 +841,8 @@ fn run_utterance(opts: &ListenOpts, tickets: &TicketRegistry) -> anyhow::Result<
         );
         if groq_cfg.is_none() && nim_cfg.is_none() || force_local {
             real_stt = susurro_adapters_stt_local::WhisperLocal::base_en(model_path.into())
-                .with_prompt(&dict_prompt);
+                .with_prompt(&dict_prompt)
+                .with_backend(local_backend.clone());
             chain_ref = None;
             &real_stt
         } else {
@@ -829,7 +862,8 @@ fn run_utterance(opts: &ListenOpts, tickets: &TicketRegistry) -> anyhow::Result<
                 }
             }
             let local = susurro_adapters_stt_local::WhisperLocal::base_en(model_path.into())
-                .with_prompt(&dict_prompt);
+                .with_prompt(&dict_prompt)
+                .with_backend(local_backend.clone());
             let mut chain = susurro_adapters_stt_cloud::SttFallbackChain::new(Box::new(local));
             if let Some(cfg) = groq_cfg {
                 chain = chain.add_provider(
@@ -852,6 +886,11 @@ fn run_utterance(opts: &ListenOpts, tickets: &TicketRegistry) -> anyhow::Result<
             &chain_stt
         }
     };
+    // Name the placement every real run: encoder versus decoder.
+    // Mock runs need no model and stay silent here.
+    if !opts.mock {
+        eprintln!("local backend: {}", local_backend.describe());
+    }
 
     // Inject.
     #[cfg(target_os = "linux")]

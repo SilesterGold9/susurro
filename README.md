@@ -73,7 +73,7 @@ quiet indicator in settings (never a forced modal).
 
 - `core/` — state machine, pipeline, port traits. No platform imports.
 - `adapters-audio/` — cpal 16kHz mono capture + mock
-- `adapters-stt-local/` — whisper.cpp via binary + mock
+- `adapters-stt-local/` — whisper.cpp via binary (+ OpenVINO iGPU encoder offload where present) + mock
 - `adapters-stt-cloud/` — stub until v0.3.0
 - `adapters-cleanup/` — passthrough until v0.1.0
 - `adapters-linux/` — Hyprland socket + wl-copy/ydotool paste

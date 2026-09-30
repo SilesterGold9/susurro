@@ -3,8 +3,11 @@
 //! - `MockStt`: deterministic transcript for tests/CI.
 //! - `WhisperLocal`: shells out to a `whisper-cpp`/`whisper-cli` binary
 //!   if present, else returns an actionable error telling the user
-//!   to install the model (base.en). Native whisper-rs binding +
-//!   OpenVINO offload land in v0.5.0 — this keeps v0.0.1 CI light.
+//!   to install the model (base.en). Native whisper-rs binding lands
+//!   after v0.5.0 — this keeps CI light.
+//! - `openvino` (v0.5.0): encoder offload to iGPU via `--ov-e-device`.
+//!   The decoder always stays on CPU. Detection is best-effort and
+//!   anything missing falls back to CPU with the reason named.
 //! - `WindowedPartial` (v0.4.0): bounded-cost partial hypotheses for
 //!   live feedback. Decodes at most the trailing window on a cadence,
 //!   so extra CPU stays flat regardless of utterance length. Partials
@@ -19,6 +22,7 @@ use susurro_core::ports::{SpeechToTextPort, Transcript};
 use susurro_core::CoreError;
 
 pub mod bench;
+pub mod openvino;
 
 pub struct MockStt {
     pub text: String,
@@ -51,6 +55,10 @@ pub struct WhisperLocal {
     /// non-speech are suppressed by the binary. Default 0.6 matches
     /// whisper.cpp. Blank output is rejected below regardless.
     pub no_speech_threshold: f32,
+    /// Compute backend. Cpu by default; OpenVino appends
+    /// `--ov-e-device` so the encoder runs on the iGPU while the
+    /// decoder stays on CPU.
+    pub backend: openvino::SttBackend,
 }
 
 impl WhisperLocal {
@@ -60,6 +68,7 @@ impl WhisperLocal {
             binary: "whisper-cli".into(),
             prompt: None,
             no_speech_threshold: 0.6,
+            backend: openvino::SttBackend::Cpu,
         }
     }
 
@@ -70,9 +79,21 @@ impl WhisperLocal {
         self
     }
 
+    pub fn with_backend(mut self, backend: openvino::SttBackend) -> Self {
+        self.backend = backend;
+        self
+    }
+
+    /// Concrete backend this instance decodes on.
+    pub fn backend(&self) -> &openvino::SttBackend {
+        &self.backend
+    }
+
     /// Command for one transcription, extracted for shape tests.
     /// NOTE: no --output-txt, that writes a sidecar file and leaves
     /// stdout empty. --no-prints + -nt keeps stdout to transcript only.
+    /// The OpenVINO flag is present only for that backend; CPU runs
+    /// byte-identical to before.
     fn command(&self, wav_path: &std::path::Path) -> Command {
         let mut cmd = Command::new(&self.binary);
         cmd.arg("-m")
@@ -85,6 +106,9 @@ impl WhisperLocal {
             .arg("-nt")
             .arg("--no-speech-thold")
             .arg(self.no_speech_threshold.to_string());
+        if let openvino::SttBackend::OpenVino { device } = &self.backend {
+            cmd.arg("--ov-e-device").arg(device);
+        }
         if let Some(p) = self.prompt.as_deref() {
             cmd.arg("--prompt").arg(p);
         }
@@ -332,6 +356,30 @@ mod tests {
         assert!(dbg.contains("--no-speech-thold"), "{dbg}");
         assert!(dbg.contains("0.6"), "{dbg}");
         assert!(!dbg.contains("--output-txt"), "{dbg}");
+    }
+
+    #[test]
+    fn cpu_command_carries_no_offload_flag() {
+        let w = WhisperLocal::base_en(PathBuf::from("/models/base.en.bin"));
+        let dbg = format!("{:?}", w.command(std::path::Path::new("/tmp/x.wav")));
+        assert!(!dbg.contains("--ov-e-device"), "{dbg}");
+    }
+
+    #[test]
+    fn openvino_command_offloads_encoder_only() {
+        use crate::openvino::SttBackend;
+        let w = WhisperLocal::base_en(PathBuf::from("/models/base.en.bin")).with_backend(
+            SttBackend::OpenVino {
+                device: "GPU".into(),
+            },
+        );
+        let dbg = format!("{:?}", w.command(std::path::Path::new("/tmp/x.wav")));
+        assert!(dbg.contains("--ov-e-device"), "{dbg}");
+        assert!(dbg.contains("\"GPU\""), "{dbg}");
+        assert_eq!(
+            w.backend().describe(),
+            "openvino (encoder on GPU, decoder on CPU)"
+        );
     }
 
     #[test]
