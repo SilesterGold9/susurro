@@ -123,14 +123,23 @@ pub fn help_advertises_ov(help: &str) -> bool {
 
 /// True when a `/dev/dri`-style dir holds a render or card node.
 pub fn igpu_present_in(dir: &std::path::Path) -> bool {
+    !igpu_nodes(dir).is_empty()
+}
+
+/// iGPU node names in a `/dev/dri`-style dir, for doctor display.
+/// Missing or unreadable dirs yield no nodes, never an error.
+pub fn igpu_nodes(dir: &std::path::Path) -> Vec<String> {
     let entries = match std::fs::read_dir(dir) {
         Ok(e) => e,
-        Err(_) => return false,
+        Err(_) => return Vec::new(),
     };
-    entries.flatten().any(|e| {
-        let name = e.file_name().to_string_lossy().into_owned();
-        name.starts_with("renderD") || name.starts_with("card")
-    })
+    let mut nodes: Vec<String> = entries
+        .flatten()
+        .map(|e| e.file_name().to_string_lossy().into_owned())
+        .filter(|n| n.starts_with("renderD") || n.starts_with("card"))
+        .collect();
+    nodes.sort();
+    nodes
 }
 
 /// True when the runtime is visible: an `ldconfig -p` line naming
@@ -156,6 +165,21 @@ pub fn runtime_roots() -> Vec<std::path::PathBuf> {
     .iter()
     .map(std::path::PathBuf::from)
     .collect()
+}
+
+fn ldconfig_text() -> String {
+    std::process::Command::new("ldconfig")
+        .arg("-p")
+        .output()
+        .map(|o| String::from_utf8_lossy(&o.stdout).into_owned())
+        .unwrap_or_default()
+}
+
+/// Live runtime probe for this machine: ldconfig plus install roots.
+pub fn runtime_present() -> bool {
+    let roots = runtime_roots();
+    let refs: Vec<&std::path::Path> = roots.iter().map(|p| p.as_path()).collect();
+    runtime_present_in(&ldconfig_text(), &refs)
 }
 
 fn flag_cache() -> &'static Mutex<HashMap<String, bool>> {
@@ -185,24 +209,13 @@ pub fn binary_advertises_ov(binary: &str) -> bool {
     advertised
 }
 
-fn ldconfig_text() -> String {
-    std::process::Command::new("ldconfig")
-        .arg("-p")
-        .output()
-        .map(|o| String::from_utf8_lossy(&o.stdout).into_owned())
-        .unwrap_or_default()
-}
-
 /// Full detection for one whisper binary. Cached flag probe plus
 /// live filesystem probes; reruns converge while the machine
 /// stays the same.
 pub fn detect(binary: &str) -> OpenVinoStatus {
     let flag = binary_advertises_ov(binary);
     let igpu = igpu_present_in(std::path::Path::new("/dev/dri"));
-    let roots = runtime_roots();
-    let refs: Vec<&std::path::Path> = roots.iter().map(|p| p.as_path()).collect();
-    let runtime = runtime_present_in(&ldconfig_text(), &refs);
-    evaluate(flag, igpu, runtime)
+    evaluate(flag, igpu, runtime_present())
 }
 
 /// Resolve a request against machine status. Returns the concrete
@@ -297,7 +310,14 @@ mod tests {
         std::fs::create_dir_all(&dir).unwrap();
         assert!(!igpu_present_in(&dir));
         std::fs::write(dir.join("renderD128"), b"").unwrap();
+        std::fs::write(dir.join("card0"), b"").unwrap();
+        std::fs::write(dir.join("controlD64"), b"").unwrap();
         assert!(igpu_present_in(&dir));
+        // Nodes listed for doctor display; control nodes excluded.
+        assert_eq!(
+            igpu_nodes(&dir),
+            vec!["card0".to_string(), "renderD128".to_string()]
+        );
         let _ = std::fs::remove_dir_all(&dir);
         assert!(!igpu_present_in(std::path::Path::new("/nonexistent-dri")));
     }

@@ -421,6 +421,62 @@ fn doctor() -> anyhow::Result<()> {
         Some(t) => println!("bench tier: {} ({})", t.as_str(), t.file_name()),
         None => println!("bench tier: unset — first listen benchmarks, or run susurro bench"),
     };
+    // Compute runtimes (v0.5.0, issue 29): everything the backend
+    // selection depends on, in one place. Each line names the fact
+    // and the fix direction; nothing here blocks dictation.
+    {
+        use susurro_adapters_stt_local::{openvino, stt_bench};
+        let cores = std::thread::available_parallelism()
+            .map(|n| n.get())
+            .unwrap_or(1);
+        println!("compute cores: {cores}");
+        let nodes = openvino::igpu_nodes(std::path::Path::new("/dev/dri"));
+        if nodes.is_empty() {
+            println!("igpu: missing — local STT stays on CPU");
+        } else {
+            println!("igpu: found ({})", nodes.join(", "));
+        }
+        println!(
+            "whisper openvino flag: {}",
+            if openvino::binary_advertises_ov("whisper-cli") {
+                "advertised"
+            } else {
+                "absent — binary predates the encoder offload"
+            }
+        );
+        println!(
+            "openvino runtime: {}",
+            if openvino::runtime_present() {
+                "found"
+            } else {
+                "missing — install openvino or intel-openvino packages for the iGPU encoder"
+            }
+        );
+        match stt_bench::detect_onnx() {
+            stt_bench::CandidateStatus::Ready => {
+                println!("onnx runtime: ready (runner lands after this milestone)")
+            }
+            stt_bench::CandidateStatus::Unavailable(reason) => {
+                println!("onnx runtime: missing — {reason}")
+            }
+        }
+        let winner = susurro_storage::SqliteSettings::open(&db_path())
+            .ok()
+            .and_then(|s| stt_bench::load_winner(&s));
+        match &winner {
+            Some(w) => println!("stt winner: {w} (from stt-bench)"),
+            None => println!("stt winner: unset — run susurro stt-bench to race backends"),
+        }
+        let ov_status = openvino::detect("whisper-cli");
+        let ov_ready = matches!(ov_status, openvino::OpenVinoStatus::Ready);
+        let (auto_backend, _) = openvino::apply_stored_winner(
+            openvino::BackendRequest::Auto,
+            winner.as_deref(),
+            ov_ready,
+            openvino::resolve(openvino::BackendRequest::Auto, &ov_status),
+        );
+        println!("auto backend: {}", auto_backend.describe());
+    }
     println!("socket: /tmp/susurro.sock (Hyprland bind triggers it)");
     // Best-effort Ollama server + model probe for --cleanup ollama.
     match std::process::Command::new("curl")
