@@ -364,6 +364,8 @@ fn cloud_config(
 /// True when a live ydotoold process entry exists under `proc_dir`.
 /// Pure over the dir path so tests use temp dirs; the live path passes
 /// /proc on Linux. Matches comm exactly, falls back to cmdline argv.
+/// Linux-only: process scanning is meaningless elsewhere.
+#[cfg(target_os = "linux")]
 fn ydotoold_running_in(proc_dir: &std::path::Path) -> bool {
     let entries = match std::fs::read_dir(proc_dir) {
         Ok(e) => e,
@@ -584,7 +586,7 @@ fn doctor() -> anyhow::Result<()> {
     #[cfg(not(target_os = "linux"))]
     println!(
         "ydotoold daemon: {}",
-        if which("ydotool") {
+        if ydotoold_running() {
             "binary present (running state is Linux-only)"
         } else {
             "missing — see README"
@@ -1825,6 +1827,7 @@ mod tests {
         let _ = std::fs::remove_dir_all(&home);
     }
 
+    #[cfg(target_os = "linux")]
     fn proc_with(comms: &[(&str, &str)]) -> std::path::PathBuf {
         let dir = std::env::temp_dir().join(format!(
             "susurro-test-proc-{}",
@@ -1839,6 +1842,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg(target_os = "linux")]
     fn ydotoold_scan_finds_comm_match() {
         let proc = proc_with(&[("101", "other\n"), ("202", "ydotoold\n")]);
         assert!(ydotoold_running_in(&proc));
@@ -1846,6 +1850,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg(target_os = "linux")]
     fn ydotoold_scan_empty_dir_is_false() {
         let proc = proc_with(&[("101", "other\n")]);
         assert!(!ydotoold_running_in(&proc));
