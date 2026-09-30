@@ -17,4 +17,5 @@ susurro-adapters-stt-local = { path = "../adapters-stt-local" }
 susurro-adapters-stt-cloud = { path = "../adapters-stt-cloud" }
 susurro-adapters-cleanup = { path = "../adapters-cleanup" }
 susurro-adapters-linux = { path = "../adapters-linux" }
+susurro-adapters-windows = { path = "../adapters-windows" }
 susurro-storage = { path = "../storage" }

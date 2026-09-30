@@ -560,6 +560,9 @@ fn doctor() -> anyhow::Result<()> {
     );
     #[cfg(not(target_os = "linux"))]
     println!("focused app: detection is Linux-only");
+    #[cfg(target_os = "windows")]
+    println!("inject: SendInput unicode direct-type (clipboard preserved)");
+    #[cfg(not(target_os = "windows"))]
     println!(
         "inject: {}",
         if which("wtype") {
@@ -976,11 +979,17 @@ fn run_utterance(opts: &ListenOpts, tickets: &TicketRegistry) -> anyhow::Result<
     } else {
         Box::new(susurro_adapters_linux::LinuxPasteInjector::new())
     };
-    #[cfg(not(target_os = "linux"))]
+    #[cfg(target_os = "windows")]
     let inject_box: Box<dyn susurro_core::ports::TextInjectionPort> = if opts.stdout {
         Box::new(StdoutInjector)
     } else {
-        anyhow::bail!("Paste injection is Linux-only in v0.0.1. Retry with --stdout.");
+        Box::new(susurro_adapters_windows::WindowsSendInput)
+    };
+    #[cfg(not(any(target_os = "linux", target_os = "windows")))]
+    let inject_box: Box<dyn susurro_core::ports::TextInjectionPort> = if opts.stdout {
+        Box::new(StdoutInjector)
+    } else {
+        anyhow::bail!("Paste injection is Linux or Windows only. Retry with --stdout.");
     };
     let inject: &dyn susurro_core::ports::TextInjectionPort = inject_box.as_ref();
 
@@ -1420,13 +1429,27 @@ fn started_buffer(pcm: Vec<i16>) -> anyhow::Result<susurro_adapters_audio::MockC
 
 fn daemon(socket_path: &str, opts: &ListenOpts) -> anyhow::Result<()> {
     use susurro_core::ports::GlobalHotkeyPort;
-    let socket = susurro_adapters_linux::HyprlandSocket::new(socket_path);
+    // Hotkey source is platform-owned: Hyprland socket on Linux,
+    // RegisterHotKey on Windows. Anything else has no daemon.
+    #[cfg(target_os = "linux")]
+    let hotkey: Box<dyn GlobalHotkeyPort> = {
+        let socket = susurro_adapters_linux::HyprlandSocket::new(socket_path);
+        println!("susurro daemon listening on {socket_path}");
+        println!("Hyprland bind: {}", socket.bind_snippet());
+        Box::new(socket)
+    };
+    #[cfg(target_os = "windows")]
+    let hotkey: Box<dyn GlobalHotkeyPort> = {
+        println!("susurro daemon listening for Win+Shift+R");
+        Box::new(susurro_adapters_windows::WindowsHotkey::with_defaults())
+    };
+    #[cfg(not(any(target_os = "linux", target_os = "windows")))]
+    let hotkey: Box<dyn GlobalHotkeyPort> =
+        { anyhow::bail!("Daemon hotkey is Linux or Windows only.") };
     let tickets = TicketRegistry::new();
-    println!("susurro daemon listening on {socket_path}");
-    println!("Hyprland bind: {}", socket.bind_snippet());
     loop {
         println!("waiting for hotkey...");
-        if let Err(e) = socket.wait_for_hotkey() {
+        if let Err(e) = hotkey.wait_for_hotkey() {
             eprintln!("Couldn't wait for hotkey. Check socket permissions: {e}");
             std::thread::sleep(std::time::Duration::from_secs(1));
             continue;

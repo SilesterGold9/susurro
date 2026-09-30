@@ -77,7 +77,7 @@ quiet indicator in settings (never a forced modal).
 - `adapters-stt-cloud/` — stub until v0.3.0
 - `adapters-cleanup/` — passthrough until v0.1.0
 - `adapters-linux/` — Hyprland socket + wl-copy/ydotool paste
-- `adapters-windows/` — stub until v0.6.0
+- `adapters-windows/` — RegisterHotKey hotkey + SendInput unicode paste
 - `storage/` — in-memory stubs until v0.2.0 SQLite
 - `cli/` — `susurro doctor`, `listen`, `daemon`, `listen-once`, `hyprland-bind`, `bench`, `stt-bench`
 - `app-tauri/` — UI lands in v0.1.0, placeholder only
