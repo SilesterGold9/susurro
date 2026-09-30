@@ -112,9 +112,13 @@ fn try_wtype(text: &str) -> WtypeOutcome {
 
 impl TextInjectionPort for LinuxPasteInjector {
     fn inject(&self, text: &str, _ticket: &Ticket) -> Result<(), CoreError> {
+        // Empty injection is a no-op on every platform, matching the
+        // Windows injector and the port contract. Real text needs tools.
+        if text.is_empty() {
+            return Ok(());
+        }
         #[cfg(not(target_os = "linux"))]
         {
-            let _ = text;
             Err(CoreError::Injection(
                 "Linux paste injection is Linux-only. Expected on Windows CI.".into(),
             ))
@@ -122,9 +126,6 @@ impl TextInjectionPort for LinuxPasteInjector {
         #[cfg(target_os = "linux")]
         {
             use std::process::{Command, Stdio};
-            if text.is_empty() {
-                return Ok(());
-            }
             if self.use_ydotool {
                 match try_wtype(text) {
                     WtypeOutcome::Typed => return Ok(()),

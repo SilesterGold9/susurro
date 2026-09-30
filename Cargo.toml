@@ -9,6 +9,7 @@ members = [
   "adapters-windows",
   "storage",
   "cli",
+  "contracts",
 ]
 # Tauri app builds standalone (needs GTK/WebKit; CI covers it separately).
 exclude = ["app-tauri/src-tauri"]

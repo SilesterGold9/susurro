@@ -80,6 +80,7 @@ quiet indicator in settings (never a forced modal).
 - `adapters-windows/` — RegisterHotKey hotkey + SendInput unicode paste
 - `storage/` — in-memory stubs until v0.2.0 SQLite
 - `cli/` — `susurro doctor`, `listen`, `daemon`, `listen-once`, `hyprland-bind`, `bench`, `stt-bench`
+- `contracts/` — port contract suite every adapter must pass (v0.7.0)
 - `app-tauri/` — UI lands in v0.1.0, placeholder only
 - `.github/workflows/` — CI + release skeletons
 
