@@ -1,8 +1,14 @@
 import { useEffect, useLayoutEffect, useRef, useState } from "react";
 import { listen } from "@tauri-apps/api/event";
+import { invoke } from "@tauri-apps/api/core";
 import { getCurrentWindow } from "@tauri-apps/api/window";
 import { Blobatar } from "@blobatar/react";
+import { useGaze } from "@blobatar/react/gaze";
 import { idle, thinking } from "blobatar/expression";
+import "blobatar/motion.css";
+import "blobatar/gaze.css";
+import "blobatar/motion.css";
+import "blobatar/gaze.css";
 
 type PillState = "idle" | "listening" | "processing" | "done" | "error";
 type ProgressTick = { stage: string; value: number };
@@ -40,13 +46,14 @@ function formatElapsed(ms: number): string {
 // characters (the colon) render as plain text, never in a strip.
 const GLYPHS = "012345678901234567890123456789";
 
-function RollDigit({ value }: { value: string }) {
+function RollDigit({ value, frozen }: { value: string; frozen: boolean }) {
   const n = value >= "0" && value <= "9" ? value.charCodeAt(0) - 48 : -1;
   const pos = useRef(10);
   const colRef = useRef<HTMLSpanElement>(null);
   // Blur clears on transition end, not on a timer: the end event is
-  // the roll actually finishing, so a stuck number can never keep a
-  // stuck blur. Reduced motion skips the blur outright.
+  // the roll actually finishing. Frozen (not recording) clears
+  // outright, which covers remounts and throttled pages where no end
+  // event ever arrives.
   useLayoutEffect(() => {
     const el = colRef.current;
     if (!el) return;
@@ -60,9 +67,13 @@ function RollDigit({ value }: { value: string }) {
     return () => el.removeEventListener("transitionend", onEnd);
   }, []);
   useLayoutEffect(() => {
-    if (n < 0) return;
     const el = colRef.current;
     if (!el) return;
+    if (frozen) {
+      el.style.filter = "";
+      return;
+    }
+    if (n < 0) return;
     const cur = ((pos.current % 10) + 10) % 10;
     if (cur === n) return;
     const next = pos.current + ((n - cur + 10) % 10);
@@ -81,7 +92,7 @@ function RollDigit({ value }: { value: string }) {
       typeof window !== "undefined" &&
       window.matchMedia("(prefers-reduced-motion: reduce)").matches;
     el.style.filter = reduce ? "" : "blur(1px)";
-  }, [value]);
+  }, [value, frozen]);
   if (n < 0) return <span className="rdigit-static">{value}</span>;
   return (
     <span className="rdigit">
@@ -96,12 +107,12 @@ function RollDigit({ value }: { value: string }) {
   );
 }
 
-function RollTimer({ elapsed }: { elapsed: number }) {
+function RollTimer({ elapsed, frozen }: { elapsed: number; frozen: boolean }) {
   const text = formatElapsed(elapsed);
   return (
     <span className="timer" aria-hidden="true">
       {text.split("").map((ch, i) => (
-        <RollDigit key={i} value={ch} />
+        <RollDigit key={i} value={ch} frozen={frozen} />
       ))}
     </span>
   );
@@ -379,14 +390,87 @@ export default function Pill() {
   // appear as a transient flash over the wave and leave; nothing
   // reflows between states.
   const avatarName = contextApp ?? "susurro";
+  const appInitial = (contextApp?.trim().match(/[A-Za-z0-9]/)?.[0] ?? "?").toUpperCase();
+  const showThought = contextApp !== null && (state === "listening" || state === "processing");
 
-  // Whole pill is a drag handle: no buttons live here, and press
-  // never starts dictation, so mousedown always means move. The move
-  // itself is compositor-mediated: it works where the compositor
-  // honors client-initiated moves of floating windows, and silently
-  // does nothing elsewhere. Default dock is unchanged.
-  function onDragStart() {
-    void getCurrentWindow().startDragging().catch(() => {});
+  // Eyes follow the pointer: the blobatar gaze layer aims the eyes at
+  // the cursor and eases home when it leaves. Settles to zero frames
+  // under a still pointer; detaches under reduced motion by itself.
+  const { ref: gazeRef } = useGaze({ travel: 3, lookAt: "pointer" });
+
+  // Pill drag, Hyprland-native first. startDragging silently no-ops
+  // here because the compositor drops client move requests without an
+  // input serial, so: mousedown resolves our window address plus its
+  // top-left and validates the move path, mousemove deltas accumulate
+  // into absolute targets flushed per frame, mouseup ends. Anything
+  // failing falls back to the platform drag for X11 and Windows.
+  type DragAnchor = { address: string; x: number; y: number };
+  const dragRef = useRef<{
+    address: string;
+    baseX: number;
+    baseY: number;
+    lastX: number;
+    lastY: number;
+    dx: number;
+    dy: number;
+    raf: number;
+  } | null>(null);
+
+  function flushDrag() {
+    const d = dragRef.current;
+    if (!d) return;
+    d.raf = 0;
+    void invoke("pill_drag_move", {
+      address: d.address,
+      x: Math.round(d.baseX + d.dx),
+      y: Math.round(d.baseY + d.dy),
+    }).catch(() => {});
+  }
+
+  function endDrag() {
+    window.removeEventListener("mousemove", onDragMove);
+    window.removeEventListener("mouseup", endDrag);
+    const d = dragRef.current;
+    dragRef.current = null;
+    if (!d) return;
+    if (d.raf) {
+      window.cancelAnimationFrame(d.raf);
+      d.raf = 0;
+      flushDrag();
+    }
+  }
+
+  function onDragMove(e: MouseEvent) {
+    const d = dragRef.current;
+    if (!d) return;
+    d.dx += e.clientX - d.lastX;
+    d.dy += e.clientY - d.lastY;
+    d.lastX = e.clientX;
+    d.lastY = e.clientY;
+    if (!d.raf) d.raf = window.requestAnimationFrame(flushDrag);
+  }
+
+  function onDragStart(e: React.MouseEvent) {
+    const startX = e.clientX;
+    const startY = e.clientY;
+    void invoke<DragAnchor>("pill_drag_start")
+      .then((anchor) => {
+        dragRef.current = {
+          address: anchor.address,
+          baseX: anchor.x,
+          baseY: anchor.y,
+          lastX: startX,
+          lastY: startY,
+          dx: 0,
+          dy: 0,
+          raf: 0,
+        };
+        window.addEventListener("mousemove", onDragMove);
+        window.addEventListener("mouseup", endDrag);
+      })
+      .catch(() => {
+        void getCurrentWindow().startDragging().catch(() => {});
+      });
   }
 
   return (
@@ -402,11 +486,18 @@ export default function Pill() {
           aria-hidden="true"
         >
           <Blobatar
+            ref={gazeRef}
             name={avatarName}
             size={30}
             traits={AVATAR_TRAITS}
             expression={state === "processing" ? thinking : idle}
+            animate="always"
           />
+          {showThought && (
+            <span className="thought" aria-hidden="true">
+              {appInitial}
+            </span>
+          )}
         </span>
         <canvas
           ref={canvasRef}
@@ -427,7 +518,7 @@ export default function Pill() {
             />
           </svg>
         )}
-        <RollTimer elapsed={elapsed} />
+        <RollTimer elapsed={elapsed} frozen={state !== "listening"} />
         {flash && (
           <span
             key={flash.key}

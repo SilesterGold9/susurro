@@ -258,9 +258,11 @@ fn show_pill(app: &AppHandle, sound: bool) {
         if let Some(m) = monitor {
             let scale = m.scale_factor();
             let size = m.size().to_logical::<f64>(scale);
-            // Window is 420x72 logical; place center-x, ~90% down.
+            // Window is 420x72 logical; place center-x, ~92% down.
+            // Below 768p screens this clips a few pixels; dragging
+            // overrides the dock wherever the compositor honors moves.
             let x = size.width / 2.0 - 420.0 / 2.0;
-            let y = size.height * 0.90;
+            let y = size.height * 0.92;
             let _ = w.set_position(tauri::Position::Logical(tauri::LogicalPosition { x, y }));
         } else {
             eprintln!("pill: no monitor found, showing at default position");
@@ -492,6 +494,97 @@ fn run_dictation(
     Ok(result)
 }
 
+#[derive(Clone, Serialize)]
+struct DragAnchor {
+    address: String,
+    x: i32,
+    y: i32,
+}
+
+fn hyprland_clients() -> Result<serde_json::Value, String> {
+    let out = std::process::Command::new("hyprctl")
+        .args(["clients", "-j"])
+        .output()
+        .map_err(|e| format!("Couldn't run hyprctl (Hyprland only): {e}"))?;
+    if !out.status.success() {
+        return Err(format!(
+            "hyprctl clients failed: {}",
+            String::from_utf8_lossy(&out.stderr).trim()
+        ));
+    }
+    serde_json::from_slice(&out.stdout)
+        .map_err(|e| format!("hyprctl returned non-JSON: {e}"))
+}
+
+/// Find our pill window: Wayland app id first, title fallback.
+fn pill_address(clients: &serde_json::Value) -> Option<(String, i32, i32)> {
+    clients.as_array()?.iter().find_map(|c| {
+        let class = c.get("class")?.as_str()?;
+        let title = c.get("title").and_then(|t| t.as_str()).unwrap_or("");
+        if class != "susurro-app" && title != "Susurro" {
+            return None;
+        }
+        let address = c.get("address")?.as_str()?.to_string();
+        let at = c.get("at")?.as_array()?;
+        let x = at.first()?.as_i64()? as i32;
+        let y = at.get(1)?.as_i64()? as i32;
+        Some((address, x, y))
+    })
+}
+
+fn hyprland_move(address: &str, x: i32, y: i32) -> Result<(), String> {
+    // Argv shape proven live: address rides the last param after a comma.
+    let out = std::process::Command::new("hyprctl")
+        .args([
+            "dispatch".to_string(),
+            "movewindowpixel".to_string(),
+            "exact".to_string(),
+            x.to_string(),
+            format!("{y},address:{address}"),
+        ])
+        .output()
+        .map_err(|e| format!("Couldn't run hyprctl (Hyprland only): {e}"))?;
+    if !out.status.success() {
+        return Err(format!(
+            "hyprctl move failed: {}",
+            String::from_utf8_lossy(&out.stderr).trim()
+        ));
+    }
+    Ok(())
+}
+
+/// Drag session anchor: resolves the pill address plus its current
+/// top-left, then validates the move path with a no-op dispatch to
+/// the same spot. Any failure falls back to the platform drag on the
+/// frontend, so this command failing is routine, never fatal.
+#[tauri::command]
+fn pill_drag_start() -> Result<DragAnchor, String> {
+    #[cfg(not(target_os = "linux"))]
+    return Err("Hyprland drag needs Linux.".into());
+    #[cfg(target_os = "linux")]
+    {
+        let clients = hyprland_clients()?;
+        let (address, x, y) =
+            pill_address(&clients).ok_or_else(|| "pill window not found in hyprctl clients.".to_string())?;
+        hyprland_move(&address, x, y)?;
+        Ok(DragAnchor { address, x, y })
+    }
+}
+
+/// One drag step: absolute top-left for the pill window.
+#[tauri::command]
+fn pill_drag_move(address: String, x: i32, y: i32) -> Result<(), String> {
+    #[cfg(not(target_os = "linux"))]
+    {
+        let _ = (address, x, y);
+        return Err("Hyprland drag needs Linux.".into());
+    }
+    #[cfg(target_os = "linux")]
+    {
+        hyprland_move(&address, x, y)
+    }
+}
+
 /// Frontend-invoked dictation (pill button / tray). Blocks; progress via events.
 #[tauri::command]
 fn start_dictation(
@@ -605,7 +698,9 @@ fn main() {
             start_dictation,
             get_settings,
             save_settings,
-            run_doctor
+            run_doctor,
+            pill_drag_start,
+            pill_drag_move
         ])
         .setup(move |app| {
             spawn_hotkey_listener(app.handle().clone(), hotkey_state.clone());
