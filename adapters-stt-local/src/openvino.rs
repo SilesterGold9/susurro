@@ -63,6 +63,29 @@ impl SttBackend {
             }
         }
     }
+
+    /// Persisted winner name. The ONNX name is accepted on read so a
+    /// future milestone's winner still parses; nothing constructs it
+    /// until the runner exists.
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Self::Cpu => "cpu",
+            Self::OpenVino { .. } => "openvino",
+        }
+    }
+
+    /// Parses `cpu` or `openvino` (any case, padded). OpenVINO takes
+    /// the GPU device, the only accelerator this milestone targets.
+    /// Anything else is None, never a guess.
+    pub fn parse_name(s: &str) -> Option<Self> {
+        match s.trim().to_lowercase().as_str() {
+            "cpu" => Some(Self::Cpu),
+            "openvino" => Some(Self::OpenVino {
+                device: "GPU".into(),
+            }),
+            _ => None,
+        }
+    }
 }
 
 /// Machine capability for the offload path.
@@ -202,6 +225,31 @@ pub fn resolve(request: BackendRequest, status: &OpenVinoStatus) -> (SttBackend,
     }
 }
 
+/// Honor a benchmark-stored winner under `--backend auto`. A stored
+/// winner that is still available replaces the static pick without a
+/// word; anything else (explicit request, unknown name, stale winner
+/// whose prerequisites vanished) leaves the static pick untouched.
+pub fn apply_stored_winner(
+    request: BackendRequest,
+    stored: Option<&str>,
+    ov_ready: bool,
+    current: (SttBackend, Option<String>),
+) -> (SttBackend, Option<String>) {
+    if request != BackendRequest::Auto {
+        return current;
+    }
+    match stored {
+        Some("cpu") => (SttBackend::Cpu, None),
+        Some("openvino") if ov_ready => (
+            SttBackend::OpenVino {
+                device: "GPU".into(),
+            },
+            None,
+        ),
+        _ => current,
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -292,5 +340,59 @@ mod tests {
             device: "GPU".into(),
         };
         assert!(ov.describe().contains("decoder on CPU"));
+    }
+
+    #[test]
+    fn backend_names_roundtrip() {
+        assert_eq!(SttBackend::Cpu.as_str(), "cpu");
+        assert_eq!(
+            SttBackend::parse_name(" OpenVINO "),
+            Some(SttBackend::OpenVino {
+                device: "GPU".into(),
+            })
+        );
+        assert_eq!(SttBackend::parse_name("cpu"), Some(SttBackend::Cpu));
+        assert_eq!(SttBackend::parse_name("onnx"), None);
+        assert_eq!(SttBackend::parse_name(""), None);
+    }
+
+    #[test]
+    fn stored_winner_overrides_static_only_for_auto() {
+        let ready = (
+            SttBackend::OpenVino {
+                device: "GPU".into(),
+            },
+            None,
+        );
+        // Bench proved CPU faster despite OV ready: auto honors it silently.
+        assert_eq!(
+            apply_stored_winner(BackendRequest::Auto, Some("cpu"), true, ready.clone()),
+            (SttBackend::Cpu, None)
+        );
+        // Explicit request always wins over stored data.
+        assert_eq!(
+            apply_stored_winner(
+                BackendRequest::Cpu,
+                Some("openvino"),
+                true,
+                (SttBackend::Cpu, None)
+            ),
+            (SttBackend::Cpu, None)
+        );
+        // Stale winner (prerequisites gone) leaves the static pick.
+        let cpu = (SttBackend::Cpu, None);
+        assert_eq!(
+            apply_stored_winner(BackendRequest::Auto, Some("openvino"), false, cpu.clone()),
+            cpu
+        );
+        // Unknown names never panic the pick.
+        assert_eq!(
+            apply_stored_winner(BackendRequest::Auto, Some("onnx"), true, cpu.clone()),
+            cpu
+        );
+        assert_eq!(
+            apply_stored_winner(BackendRequest::Auto, None, true, cpu.clone()),
+            cpu
+        );
     }
 }

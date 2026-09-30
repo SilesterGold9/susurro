@@ -150,6 +150,10 @@ enum Cmd {
     /// small). First listen benchmarks automatically; rerun this
     /// after a hardware change.
     Bench,
+    /// Race the available local STT backends on synthesized audio
+    /// and persist the winner. Auto backend honors the stored
+    /// winner while it stays available.
+    SttBench,
 }
 
 fn main() -> anyhow::Result<()> {
@@ -254,6 +258,7 @@ fn main() -> anyhow::Result<()> {
         Cmd::PrivacyRemove { app } => privacy_remove(&app),
         Cmd::PrivacyList => privacy_list(),
         Cmd::Bench => bench(),
+        Cmd::SttBench => stt_bench(),
     }
 }
 
@@ -730,7 +735,23 @@ fn run_utterance(opts: &ListenOpts, tickets: &TicketRegistry) -> anyhow::Result<
         (susurro_adapters_stt_local::openvino::SttBackend::Cpu, None)
     } else {
         let status = susurro_adapters_stt_local::openvino::detect("whisper-cli");
-        susurro_adapters_stt_local::openvino::resolve(backend_request, &status)
+        let ov_ready = matches!(
+            status,
+            susurro_adapters_stt_local::openvino::OpenVinoStatus::Ready
+        );
+        let static_pick = susurro_adapters_stt_local::openvino::resolve(backend_request, &status);
+        // Benchmark winner (v0.5.0, issue 28): a stored winner that is
+        // still available replaces the static pick under auto. A broken
+        // store reads as no winner; dictation never blocks on it.
+        let stored = susurro_storage::SqliteSettings::open(&db_path)
+            .ok()
+            .and_then(|s| susurro_adapters_stt_local::stt_bench::load_winner(&s));
+        susurro_adapters_stt_local::openvino::apply_stored_winner(
+            backend_request,
+            stored.as_deref(),
+            ov_ready,
+            static_pick,
+        )
     };
     if let Some(w) = &backend_warning {
         eprintln!("backend: {w}");
@@ -1200,6 +1221,77 @@ fn ensure_bench_tier(explicit: &Option<String>) {
         tier.as_str(),
         tier.file_name()
     );
+}
+
+/// Race the available local STT backends on synthesized audio and
+/// persist the winner (v0.5.0, issue 28). CPU always runs; OpenVINO
+/// runs when its prerequisites hold; the ONNX cell reports without
+/// timing until its runner lands. A failing backend loses with its
+/// number attached instead of aborting the bench.
+fn stt_bench() -> anyhow::Result<()> {
+    use susurro_adapters_stt_local::{openvino, stt_bench};
+    let model_path = resolve_model(&None);
+    if !std::path::Path::new(&model_path).exists() {
+        anyhow::bail!("model missing at {model_path}. Download one and run susurro doctor.");
+    }
+    let pcm = stt_bench::synth_sine(stt_bench::RACE_SECONDS);
+    println!(
+        "audio: {}s synthesized sine ({} samples)",
+        stt_bench::RACE_SECONDS,
+        pcm.len()
+    );
+    let mut timings: Vec<(&str, u128)> = Vec::new();
+    // Ungated decode: race audio decodes to a sound tag, and the
+    // no-speech gate would reject it after the full decode ran.
+    // Timing decode_text measures the work winner-default pays for.
+    let cpu = susurro_adapters_stt_local::WhisperLocal::base_en(model_path.clone().into());
+    let (ms, out) = stt_bench::time_call(|| cpu.decode_text(&pcm));
+    println!(
+        "cpu: {ms}ms ({})",
+        match &out {
+            Ok(t) => format!("decoded {} chars", t.chars().count()),
+            Err(e) => format!("failed: {e}"),
+        }
+    );
+    timings.push(("cpu", ms));
+    let ov_status = openvino::detect("whisper-cli");
+    if ov_status == openvino::OpenVinoStatus::Ready {
+        let ov = susurro_adapters_stt_local::WhisperLocal::base_en(model_path.into()).with_backend(
+            openvino::SttBackend::OpenVino {
+                device: "GPU".into(),
+            },
+        );
+        let (ms, out) = stt_bench::time_call(|| ov.decode_text(&pcm));
+        println!(
+            "openvino: {ms}ms ({})",
+            match &out {
+                Ok(t) => format!("decoded {} chars", t.chars().count()),
+                Err(e) => format!("failed: {e}"),
+            }
+        );
+        timings.push(("openvino", ms));
+    } else if let openvino::OpenVinoStatus::Unavailable(reason) = &ov_status {
+        println!("openvino: skipped ({reason})");
+    }
+    match stt_bench::detect_onnx() {
+        stt_bench::CandidateStatus::Ready => {
+            println!("onnx: ready but no runner ships in this milestone, not timed");
+        }
+        stt_bench::CandidateStatus::Unavailable(reason) => {
+            println!("onnx: skipped ({reason})");
+        }
+    }
+    let winner = stt_bench::pick_winner(&timings).unwrap_or("cpu");
+    println!("winner: {winner}. Auto backend uses it while it stays available.");
+    match susurro_storage::SqliteSettings::open(&db_path()) {
+        Ok(mut store) => {
+            stt_bench::store_winner(&mut store, winner)
+                .map_err(|e| anyhow::anyhow!("Couldn't save winner: {e}"))?;
+            println!("saved.");
+        }
+        Err(e) => println!("winner not saved (store degraded: {e})."),
+    }
+    Ok(())
 }
 
 /// VAD auto-stop: record 1s chunks up to `opts.seconds`, ending early

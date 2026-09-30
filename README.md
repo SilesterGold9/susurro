@@ -79,7 +79,7 @@ quiet indicator in settings (never a forced modal).
 - `adapters-linux/` — Hyprland socket + wl-copy/ydotool paste
 - `adapters-windows/` — stub until v0.6.0
 - `storage/` — in-memory stubs until v0.2.0 SQLite
-- `cli/` — `susurro doctor`, `listen`, `daemon`, `listen-once`, `hyprland-bind`, `bench`
+- `cli/` — `susurro doctor`, `listen`, `daemon`, `listen-once`, `hyprland-bind`, `bench`, `stt-bench`
 - `app-tauri/` — UI lands in v0.1.0, placeholder only
 - `.github/workflows/` — CI + release skeletons
 

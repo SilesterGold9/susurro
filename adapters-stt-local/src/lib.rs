@@ -8,6 +8,9 @@
 //! - `openvino` (v0.5.0): encoder offload to iGPU via `--ov-e-device`.
 //!   The decoder always stays on CPU. Detection is best-effort and
 //!   anything missing falls back to CPU with the reason named.
+//! - `stt_bench` (v0.5.0): race the available local backends on
+//!   synthesized audio; the winner persists and `--backend auto`
+//!   honors it. The ONNX EP slot detects only until its runner lands.
 //! - `WindowedPartial` (v0.4.0): bounded-cost partial hypotheses for
 //!   live feedback. Decodes at most the trailing window on a cadence,
 //!   so extra CPU stays flat regardless of utterance length. Partials
@@ -23,6 +26,7 @@ use susurro_core::CoreError;
 
 pub mod bench;
 pub mod openvino;
+pub mod stt_bench;
 
 pub struct MockStt {
     pub text: String,
@@ -128,6 +132,32 @@ pub fn is_blank_transcript(text: &str) -> bool {
 
 impl SpeechToTextPort for WhisperLocal {
     fn transcribe(&self, pcm: &[i16]) -> Result<Transcript, CoreError> {
+        let text = self.decode_text(pcm)?;
+        // No-speech gate: silence must never inject an empty string
+        // or a hallucinated tag into the app and history.
+        if is_blank_transcript(&text) {
+            return Err(CoreError::Transcription(
+                "heard only silence, nothing injected. Speak during the recording window.".into(),
+            ));
+        }
+        Ok(Transcript {
+            text,
+            is_partial: false,
+        })
+    }
+
+    fn model_name(&self) -> &str {
+        "base.en"
+    }
+}
+
+impl WhisperLocal {
+    /// Raw decode without the no-speech gate: runs the binary and
+    /// returns whatever it printed, bracketed sound tags included.
+    /// Dictation always goes through `transcribe`; the backend bench
+    /// uses this so race audio that decodes to a sound tag still
+    /// times the full decode instead of losing on a string check.
+    pub fn decode_text(&self, pcm: &[i16]) -> Result<String, CoreError> {
         if pcm.is_empty() {
             return Err(CoreError::Transcription("empty audio".into()));
         }
@@ -153,18 +183,10 @@ impl SpeechToTextPort for WhisperLocal {
         match out {
             Ok(o) if o.status.success() => {
                 let text = String::from_utf8_lossy(&o.stdout).trim().to_string();
-                // No-speech gate: silence must never inject an empty string
-                // or a hallucinated tag into the app and history.
-                if is_blank_transcript(&text) {
-                    return Err(CoreError::Transcription(
-                        "heard only silence, nothing injected. Speak during the recording window."
-                            .into(),
-                    ));
+                if text.is_empty() {
+                    return Err(CoreError::Transcription("whisper returned no text".into()));
                 }
-                Ok(Transcript {
-                    text,
-                    is_partial: false,
-                })
+                Ok(text)
             }
             Ok(o) => Err(CoreError::Transcription(format!(
                 "whisper binary failed: {}",
@@ -175,10 +197,6 @@ impl SpeechToTextPort for WhisperLocal {
                 self.binary
             ))),
         }
-    }
-
-    fn model_name(&self) -> &str {
-        "base.en"
     }
 }
 
