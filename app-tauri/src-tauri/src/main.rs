@@ -396,6 +396,17 @@ fn run_dictation(
 ) -> Result<UtteranceResult, String> {
     let t0 = std::time::Instant::now();
     emit_state(app, "listening");
+    // Dictation context for the pill avatar: which app receives the
+    // text. Linux auto-detects; elsewhere the avatar stays generic.
+    // Best-effort display data, never blocks the run.
+    #[cfg(target_os = "linux")]
+    let focused = susurro_adapters_linux::focused_app();
+    #[cfg(not(target_os = "linux"))]
+    let focused: Option<String> = None;
+    let _ = app.emit(
+        "susurro://context",
+        serde_json::json!({ "app": focused }),
+    );
     let cues = susurro_adapters_audio::CuePlayer::new(settings.sound);
 
     let pcm = capture_pcm(app, settings, &cues)?;

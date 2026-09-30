@@ -16,6 +16,34 @@ const ACTIVE = "#d85a30";
 const REST = "#8a877f";
 const TEAL = "#0f6e56";
 
+// Neutral avatar shades only. Teal means working and coral means
+// failed, so app identity must never borrow either signal color.
+const AVATAR_SHADES = ["#8a877f", "#a09a8c", "#7d7a72", "#94897a", "#857c6e", "#9c8f7d"];
+
+type Avatar = { initial: string; shade: string };
+
+// Deterministic avatar from the app class string: same app, same
+// initial and shade, every session. Identity varies across apps,
+// so this is where generativity carries information.
+function avatarFor(app: string | null): Avatar {
+  if (!app || !app.trim()) return { initial: "?", shade: AVATAR_SHADES[0] };
+  const name = app.trim();
+  const initial = (name.match(/[A-Za-z0-9]/)?.[0] ?? "?").toUpperCase();
+  let hash = 5381;
+  const lower = name.toLowerCase();
+  for (let i = 0; i < lower.length; i += 1) {
+    hash = ((hash << 5) + hash + lower.charCodeAt(i)) >>> 0;
+  }
+  return { initial, shade: AVATAR_SHADES[hash % AVATAR_SHADES.length] };
+}
+
+function formatElapsed(ms: number): string {
+  const s = Math.max(0, Math.floor(ms / 1000));
+  const mm = String(Math.floor(s / 60)).padStart(2, "0");
+  const ss = String(s % 60).padStart(2, "0");
+  return `${mm}:${ss}`;
+}
+
 type CtxWithRoundRect = CanvasRenderingContext2D & {
   roundRect?: (x: number, y: number, w: number, h: number, r: number) => void;
 };
@@ -25,7 +53,11 @@ export default function Pill() {
   const [lastText, setLastText] = useState("");
   const [errorMsg, setErrorMsg] = useState("");
   const [settleKey, setSettleKey] = useState(0);
+  const [contextApp, setContextApp] = useState<string | null>(null);
+  const [elapsed, setElapsed] = useState(0);
   const stateRef = useRef<PillState>("idle");
+  const startedAt = useRef(0);
+  const timerId = useRef<number>(0);
   const ring = useRef<number[]>(new Array(SLICES).fill(0));
   const bars = useRef<number[]>(new Array(BARS).fill(0));
   const peaks = useRef<number[]>(new Array(BARS).fill(0));
@@ -64,6 +96,9 @@ export default function Pill() {
       listen<string>("susurro://error", (e) => {
         setErrorMsg(e.payload);
       }),
+      listen<{ app: string | null }>("susurro://context", (e) => {
+        setContextApp(e.payload?.app ?? null);
+      }),
     ];
     return () => {
       offs.forEach((p) => p.then((off) => off()));
@@ -100,6 +135,32 @@ export default function Pill() {
   // Clear stale errors when a new run starts.
   useEffect(() => {
     if (state === "listening") setErrorMsg("");
+  }, [state]);
+
+  // Dictation timer: runs from listening through processing, holds
+  // the total on done and error, resets on a new run. Tick is coarse
+  // (250ms) because the canvas loop already owns per-frame work.
+  useEffect(() => {
+    if (state === "listening") {
+      startedAt.current = Date.now();
+      setElapsed(0);
+    }
+    if (state === "listening" || state === "processing") {
+      if (timerId.current) return;
+      timerId.current = window.setInterval(() => {
+        setElapsed(Date.now() - startedAt.current);
+      }, 250);
+      return () => {
+        window.clearInterval(timerId.current);
+        timerId.current = 0;
+      };
+    }
+    if (timerId.current) {
+      window.clearInterval(timerId.current);
+      timerId.current = 0;
+    }
+    if (state === "idle") setElapsed(0);
+    return undefined;
   }, [state]);
 
   function pooled(): number[] {
@@ -235,10 +296,19 @@ export default function Pill() {
             ? "pasted"
             : (errorMsg || "couldn't paste").slice(0, 64);
 
+  const avatar = avatarFor(contextApp);
+
   return (
     <div className="pill-wrap">
       <div className={`pill state-${state}${state === "done" ? " settle" : ""}`} key={settleKey}>
-        <span className="dot" aria-hidden="true" />
+        <span
+          className="avatar"
+          style={{ background: state === "error" ? "transparent" : avatar.shade }}
+          title={contextApp ? `dictating into ${contextApp}` : "dictation target unknown"}
+          aria-hidden="true"
+        >
+          {avatar.initial}
+        </span>
         <canvas
           ref={canvasRef}
           width={WAVE_W * SCALE}
@@ -258,6 +328,9 @@ export default function Pill() {
             />
           </svg>
         )}
+        <span className="timer" aria-hidden="true">
+          {formatElapsed(elapsed)}
+        </span>
         <span className={`status${state === "error" ? " is-error" : ""}`} role="status">
           {label}
         </span>
