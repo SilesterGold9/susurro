@@ -1,5 +1,7 @@
 import { useEffect, useRef, useState } from "react";
 import { listen } from "@tauri-apps/api/event";
+import { Blobatar } from "@blobatar/react";
+import { idle, thinking } from "blobatar/expression";
 
 type PillState = "idle" | "listening" | "processing" | "done" | "error";
 type ProgressTick = { stage: string; value: number };
@@ -16,26 +18,11 @@ const ACTIVE = "#d85a30";
 const REST = "#8a877f";
 const TEAL = "#0f6e56";
 
-// Neutral avatar shades only. Teal means working and coral means
-// failed, so app identity must never borrow either signal color.
-const AVATAR_SHADES = ["#8a877f", "#a09a8c", "#7d7a72", "#94897a", "#857c6e", "#9c8f7d"];
-
-type Avatar = { initial: string; shade: string };
-
-// Deterministic avatar from the app class string: same app, same
-// initial and shade, every session. Identity varies across apps,
-// so this is where generativity carries information.
-function avatarFor(app: string | null): Avatar {
-  if (!app || !app.trim()) return { initial: "?", shade: AVATAR_SHADES[0] };
-  const name = app.trim();
-  const initial = (name.match(/[A-Za-z0-9]/)?.[0] ?? "?").toUpperCase();
-  let hash = 5381;
-  const lower = name.toLowerCase();
-  for (let i = 0; i < lower.length; i += 1) {
-    hash = ((hash << 5) + hash + lower.charCodeAt(i)) >>> 0;
-  }
-  return { initial, shade: AVATAR_SHADES[hash % AVATAR_SHADES.length] };
-}
+// Blobatar voice: one face per app, always the same face for the same
+// app. Tone pinned to the pale neutral swatch so identity reads in
+// silhouette, never in saturated color: teal means working and coral
+// means failed, and the avatar must never borrow either signal.
+const AVATAR_TRAITS = { tone: [0.25] };
 
 function formatElapsed(ms: number): string {
   const s = Math.max(0, Math.floor(ms / 1000));
@@ -288,26 +275,32 @@ export default function Pill() {
       ? lastText
         ? "ready"
         : "press super shift d"
-      : state === "listening"
-        ? "listening"
-        : state === "processing"
-          ? "working"
-          : state === "done"
-            ? "pasted"
-            : (errorMsg || "couldn't paste").slice(0, 64);
+      : state === "listening" || state === "processing"
+        ? (contextApp ?? "listening")
+        : state === "done"
+          ? "pasted"
+          : (errorMsg || "couldn't paste").slice(0, 64);
 
-  const avatar = avatarFor(contextApp);
+  // The row stays visually stable across the active session: the
+  // label names the target app from listening through processing, so
+  // the listening/working swap that churned the row is gone. State
+  // rides the avatar ring plus the timer; words only confirm.
+  const avatarName = contextApp ?? "susurro";
 
   return (
     <div className="pill-wrap">
       <div className={`pill state-${state}${state === "done" ? " settle" : ""}`} key={settleKey}>
         <span
           className="avatar"
-          style={{ background: state === "error" ? "transparent" : avatar.shade }}
           title={contextApp ? `dictating into ${contextApp}` : "dictation target unknown"}
           aria-hidden="true"
         >
-          {avatar.initial}
+          <Blobatar
+            name={avatarName}
+            size={24}
+            traits={AVATAR_TRAITS}
+            expression={state === "processing" ? thinking : idle}
+          />
         </span>
         <canvas
           ref={canvasRef}

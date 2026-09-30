@@ -258,9 +258,9 @@ fn show_pill(app: &AppHandle, sound: bool) {
         if let Some(m) = monitor {
             let scale = m.scale_factor();
             let size = m.size().to_logical::<f64>(scale);
-            // Window is 364x64 logical; place center-x, ~78% down.
+            // Window is 364x64 logical; place center-x, ~88% down.
             let x = size.width / 2.0 - 364.0 / 2.0;
-            let y = size.height * 0.78;
+            let y = size.height * 0.88;
             let _ = w.set_position(tauri::Position::Logical(tauri::LogicalPosition { x, y }));
         } else {
             eprintln!("pill: no monitor found, showing at default position");

@@ -242,7 +242,7 @@ fn main() -> anyhow::Result<()> {
             println!("    match:title = ^(Susurro)$");
             println!("    float = true");
             println!("    size = 364 64");
-            println!("    move = (monitor_w-364)/2 (monitor_h*0.78)");
+            println!("    move = (monitor_w-364)/2 (monitor_h*0.88)");
             println!("    pin = true");
             println!("    border_size = 0");
             println!("    rounding = 18");
