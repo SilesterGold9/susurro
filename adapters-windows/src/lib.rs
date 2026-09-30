@@ -233,21 +233,27 @@ mod tests {
 
     /// Real registration roundtrip, Windows CI only: proves the flags
     /// and id reach Win32 and come back. No message loop, never blocks.
+    /// The error code rides in the message so a headless-runner failure
+    /// names itself instead of asserting bare zeros.
     #[test]
     #[cfg(target_os = "windows")]
     fn hotkey_registers_and_releases() {
         unsafe {
+            use windows_sys::Win32::Foundation::GetLastError;
             use windows_sys::Win32::UI::Input::KeyboardAndMouse::{
                 RegisterHotKey, UnregisterHotKey,
             };
+            let registered = RegisterHotKey(
+                std::ptr::null_mut(),
+                HOTKEY_ID,
+                DEFAULT_MODIFIERS_WIN,
+                DEFAULT_VK_R,
+            );
             assert_ne!(
-                RegisterHotKey(
-                    std::ptr::null_mut(),
-                    HOTKEY_ID,
-                    DEFAULT_MODIFIERS_WIN,
-                    DEFAULT_VK_R
-                ),
-                0
+                registered,
+                0,
+                "RegisterHotKey failed, GetLastError={}",
+                GetLastError()
             );
             assert_ne!(UnregisterHotKey(std::ptr::null_mut(), HOTKEY_ID), 0);
         }
