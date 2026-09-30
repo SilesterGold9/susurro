@@ -233,6 +233,19 @@ export default function Pill() {
     }
   }, [state, errorMsg, lastText]);
 
+  // Session target announcement: names the app once at listening
+  // start so the bubble initial never puzzles alone. Transient by
+  // design, gone in 2.5 seconds, never during the session itself.
+  useEffect(() => {
+    if (state !== "listening" || !contextApp) return;
+    const key = Date.now();
+    setFlash({ text: `in ${contextApp}`, key });
+    const id = window.setTimeout(() => {
+      setFlash((f) => (f && f.key === key ? null : f));
+    }, 2500);
+    return () => window.clearTimeout(id);
+  }, [state, contextApp]);
+
   // Dictation timer: runs while recording only, so the number is
   // the take length. Freezes the moment capture ends; processing
   // and done hold the total, a new run resets it.

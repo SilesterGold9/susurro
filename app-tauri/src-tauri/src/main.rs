@@ -555,6 +555,32 @@ fn hyprland_move(address: &str, x: i32, y: i32) -> Result<(), String> {
     Ok(())
 }
 
+/// Drag trace for real-session diagnosis: appends one line per drag
+/// event to /tmp/susurro-drag.log so a failed drag leaves evidence
+/// instead of silence. Always on, drag-only volume. Best-effort.
+#[cfg(target_os = "linux")]
+fn trace_drag(line: &str) {
+    use std::io::Write;
+    let path = std::path::PathBuf::from("/tmp/susurro-drag.log");
+    let mut opts = std::fs::OpenOptions::new();
+    opts.create(true).append(true);
+    if let Ok(f) = std::fs::metadata(&path) {
+        if f.len() > 50_000 {
+            let _ = std::fs::remove_file(&path);
+        }
+    }
+    if let Ok(mut f) = opts.open(&path) {
+        let _ = writeln!(
+            f,
+            "{} {line}",
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|d| d.as_secs())
+                .unwrap_or(0)
+        );
+    }
+}
+
 /// Drag session anchor: resolves the pill address plus its current
 /// top-left, then validates the move path with a no-op dispatch to
 /// the same spot. Any failure falls back to the platform drag on the
@@ -568,10 +594,18 @@ fn pill_drag_start() -> Result<DragAnchor, String> {
     #[cfg(target_os = "linux")]
     {
         let clients = hyprland_clients()?;
-        let (address, x, y) = pill_address(&clients)
-            .ok_or_else(|| "pill window not found in hyprctl clients.".to_string())?;
-        hyprland_move(&address, x, y)?;
-        Ok(DragAnchor { address, x, y })
+        let (address, x, y) =
+            pill_address(&clients).ok_or_else(|| "pill window not found in hyprctl clients.".to_string())?;
+        match hyprland_move(&address, x, y) {
+            Ok(()) => {
+                trace_drag(&format!("start ok {address} {x},{y}"));
+                Ok(DragAnchor { address, x, y })
+            }
+            Err(e) => {
+                trace_drag(&format!("start err {e}"));
+                Err(e)
+            }
+        }
     }
 }
 
@@ -585,7 +619,16 @@ fn pill_drag_move(address: String, x: i32, y: i32) -> Result<(), String> {
     }
     #[cfg(target_os = "linux")]
     {
-        hyprland_move(&address, x, y)
+        match hyprland_move(&address, x, y) {
+            Ok(()) => {
+                trace_drag(&format!("move ok {x},{y}"));
+                Ok(())
+            }
+            Err(e) => {
+                trace_drag(&format!("move err {e}"));
+                Err(e)
+            }
+        }
     }
 }
 
