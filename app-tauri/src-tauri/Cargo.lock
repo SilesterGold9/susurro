@@ -3467,7 +3467,7 @@ checksum = "13c2bddecc57b384dee18652358fb23172facb8a2c51ccc10d74c157bdea3292"
 
 [[package]]
 name = "susurro-adapters-audio"
-version = "0.0.1"
+version = "0.3.0"
 dependencies = [
  "cpal",
  "susurro-core",
@@ -3476,7 +3476,7 @@ dependencies = [
 
 [[package]]
 name = "susurro-adapters-cleanup"
-version = "0.0.1"
+version = "0.3.0"
 dependencies = [
  "serde_json",
  "susurro-core",
@@ -3484,22 +3484,31 @@ dependencies = [
 
 [[package]]
 name = "susurro-adapters-linux"
-version = "0.0.1"
+version = "0.3.0"
 dependencies = [
+ "serde_json",
  "susurro-core",
 ]
 
 [[package]]
 name = "susurro-adapters-stt-local"
-version = "0.0.1"
+version = "0.3.0"
 dependencies = [
  "susurro-core",
  "thiserror 2.0.21",
 ]
 
 [[package]]
+name = "susurro-adapters-windows"
+version = "0.3.0"
+dependencies = [
+ "susurro-core",
+ "windows-sys 0.59.0",
+]
+
+[[package]]
 name = "susurro-app"
-version = "0.1.0"
+version = "0.3.0"
 dependencies = [
  "anyhow",
  "serde",
@@ -3508,6 +3517,7 @@ dependencies = [
  "susurro-adapters-cleanup",
  "susurro-adapters-linux",
  "susurro-adapters-stt-local",
+ "susurro-adapters-windows",
  "susurro-core",
  "tauri",
  "tauri-build",
@@ -3516,7 +3526,7 @@ dependencies = [
 
 [[package]]
 name = "susurro-core"
-version = "0.0.1"
+version = "0.3.0"
 dependencies = [
  "serde",
  "serde_json",

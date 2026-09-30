@@ -6,6 +6,7 @@
 use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
+#[cfg(target_os = "linux")]
 use susurro_adapters_audio::{EndpointDecision, VadEndpoint};
 use susurro_core::ports::{AudioCapturePort, TextInjectionPort, TextPostProcessorPort};
 use susurro_core::{Pipeline, SessionId, TicketRegistry};
@@ -65,8 +66,11 @@ impl AppState {
         std::fs::create_dir_all(&self.dir).map_err(|e| e.to_string())?;
         // Atomic write: temp + rename.
         let tmp = f.with_extension("json.tmp");
-        std::fs::write(&tmp, serde_json::to_string_pretty(&*s).map_err(|e| e.to_string())?)
-            .map_err(|e| e.to_string())?;
+        std::fs::write(
+            &tmp,
+            serde_json::to_string_pretty(&*s).map_err(|e| e.to_string())?,
+        )
+        .map_err(|e| e.to_string())?;
         std::fs::rename(&tmp, &f).map_err(|e| e.to_string())?;
         Ok(())
     }
@@ -77,16 +81,27 @@ fn shellexpand(p: &str) -> String {
         if let Ok(home) = std::env::var("HOME") {
             return format!("{home}/{rest}");
         }
+        if let Ok(home) = std::env::var("USERPROFILE") {
+            return format!("{home}/{rest}");
+        }
     }
     p.to_string()
 }
 
-fn model_file(name: &str) -> Option<String> {
+fn models_home() -> Option<PathBuf> {
     if let Ok(home) = std::env::var("HOME") {
-        let p = PathBuf::from(home).join(".local/share/susurro/models").join(name);
-        if p.exists() {
-            return Some(p.to_string_lossy().into_owned());
-        }
+        return Some(PathBuf::from(home).join(".local/share/susurro/models"));
+    }
+    // Windows first-run when HOME is unset.
+    std::env::var("USERPROFILE")
+        .ok()
+        .map(|home| PathBuf::from(home).join(".local/share/susurro/models"))
+}
+
+fn model_file(name: &str) -> Option<String> {
+    let p = models_home()?.join(name);
+    if p.exists() {
+        return Some(p.to_string_lossy().into_owned());
     }
     None
 }
@@ -141,7 +156,13 @@ fn run_doctor() -> String {
         "ollama",
         "curl",
     ] {
-        let found = std::process::Command::new("which")
+        // `where` is the Windows equivalent; failure means missing,
+        // never an error, so doctor degrades to install hints.
+        #[cfg(target_os = "windows")]
+        let probe = "where";
+        #[cfg(not(target_os = "windows"))]
+        let probe = "which";
+        let found = std::process::Command::new(probe)
             .arg(tool)
             .output()
             .map(|o| o.status.success())
@@ -195,7 +216,12 @@ impl TextInjectionPort for GuiInjector {
         text: &str,
         ticket: &susurro_core::Ticket,
     ) -> Result<(), susurro_core::CoreError> {
-        susurro_adapters_linux::LinuxPasteInjector::new().inject(text, ticket)
+        // Injection is platform-owned: clipboard-free Unicode typing
+        // on Windows, wl-copy/ydotool paste on Linux.
+        #[cfg(target_os = "windows")]
+        return susurro_adapters_windows::WindowsSendInput.inject(text, ticket);
+        #[cfg(not(target_os = "windows"))]
+        return susurro_adapters_linux::LinuxPasteInjector::new().inject(text, ticket);
     }
 }
 
@@ -235,10 +261,7 @@ fn show_pill(app: &AppHandle, sound: bool) {
             // Window is 364x64 logical; place center-x, ~78% down.
             let x = size.width / 2.0 - 364.0 / 2.0;
             let y = size.height * 0.78;
-            let _ = w.set_position(tauri::Position::Logical(tauri::LogicalPosition {
-                x,
-                y,
-            }));
+            let _ = w.set_position(tauri::Position::Logical(tauri::LogicalPosition { x, y }));
         } else {
             eprintln!("pill: no monitor found, showing at default position");
         }
@@ -276,10 +299,93 @@ struct ProgressTick {
 }
 
 fn emit_progress(app: &AppHandle, stage: susurro_core::Stage, value: f32) {
-    let _ = app.emit(
-        "susurro://progress",
-        ProgressTick { stage, value },
-    );
+    let _ = app.emit("susurro://progress", ProgressTick { stage, value });
+}
+
+/// Capture is platform-owned: PipeWire with VAD auto-stop on Linux,
+/// cpal fixed-window on Windows (chunked VAD parity is future work),
+/// actionable error elsewhere. Waveform animation and cues run in
+/// every path so the pill behaves the same while recording.
+#[cfg(target_os = "linux")]
+fn capture_pcm(
+    app: &AppHandle,
+    settings: &Settings,
+    cues: &susurro_adapters_audio::CuePlayer,
+) -> Result<Vec<i16>, String> {
+    // Only a VAD end plays the stop cue. Cap-timeout stops stay silent
+    // so the two endings feel different.
+    let mut endpoint = VadEndpoint::default();
+    let mut all: Vec<i16> = Vec::new();
+    let max = if settings.auto_stop {
+        settings.seconds.clamp(2, 30)
+    } else {
+        1
+    };
+    if settings.auto_stop {
+        for _ in 0..max {
+            let target = (!settings.device.is_empty()).then_some(settings.device.as_str());
+            let chunk = susurro_adapters_audio::record_pipewire(1, target)
+                .map_err(|e| format!("Couldn't capture audio. Check mic: {e}"))?;
+            let tail = susurro_adapters_audio::trim_transient(&chunk);
+            animate_levels(app.clone(), tail.to_vec());
+            let d = endpoint.push(tail, 1.0);
+            all.extend_from_slice(&chunk);
+            if d == EndpointDecision::EndOfSpeech {
+                cues.play(susurro_adapters_audio::Cue::Stop);
+                break;
+            }
+        }
+    } else {
+        let target = (!settings.device.is_empty()).then_some(settings.device.as_str());
+        all = susurro_adapters_audio::record_pipewire(settings.seconds.clamp(1, 30), target)
+            .map_err(|e| format!("Couldn't capture audio. Check mic: {e}"))?;
+        animate_levels(app.clone(), all.clone());
+    }
+    if all.is_empty() {
+        let msg = "Captured zero samples. Is the mic muted?";
+        cues.play(susurro_adapters_audio::Cue::Error);
+        emit_error(app, msg);
+        return Err(msg.into());
+    }
+    Ok(all)
+}
+
+#[cfg(target_os = "windows")]
+fn capture_pcm(
+    app: &AppHandle,
+    settings: &Settings,
+    cues: &susurro_adapters_audio::CuePlayer,
+) -> Result<Vec<i16>, String> {
+    use susurro_adapters_audio::CpalCapture;
+    let seconds = settings.seconds.clamp(1, 30);
+    let target = (!settings.device.is_empty()).then_some(settings.device.as_str());
+    let mut cap = match target {
+        Some(dev) => CpalCapture::with_device(seconds, dev),
+        None => CpalCapture::new(seconds),
+    };
+    cap.start()
+        .map_err(|e| format!("Couldn't start capture. Check mic permissions: {e}"))?;
+    let chunk = cap
+        .next_chunk()
+        .map_err(|e| format!("Couldn't capture audio. Check mic permissions: {e}"))?;
+    let _ = cap.stop();
+    animate_levels(app.clone(), chunk.samples.clone());
+    if chunk.samples.is_empty() {
+        let msg = "Captured zero samples. Is the mic muted?";
+        cues.play(susurro_adapters_audio::Cue::Error);
+        emit_error(app, msg);
+        return Err(msg.into());
+    }
+    Ok(chunk.samples)
+}
+
+#[cfg(not(any(target_os = "linux", target_os = "windows")))]
+fn capture_pcm(
+    _app: &AppHandle,
+    _settings: &Settings,
+    _cues: &susurro_adapters_audio::CuePlayer,
+) -> Result<Vec<i16>, String> {
+    Err("Capture needs Linux or Windows.".into())
 }
 
 /// Shared dictation run used by the command, tray, and hotkey thread.
@@ -292,46 +398,7 @@ fn run_dictation(
     emit_state(app, "listening");
     let cues = susurro_adapters_audio::CuePlayer::new(settings.sound);
 
-    // record_pipewire compiles everywhere and fails actionably where
-    // no sound server tooling exists; no cfg gates needed here.
-    // Only a VAD end plays the stop cue. Cap-timeout stops stay silent
-    // so the two endings feel different.
-    let pcm = {
-        let mut endpoint = VadEndpoint::default();
-        let mut all: Vec<i16> = Vec::new();
-        let max = if settings.auto_stop {
-            settings.seconds.clamp(2, 30)
-        } else {
-            1
-        };
-        if settings.auto_stop {
-            for _ in 0..max {
-                let target = (!settings.device.is_empty()).then_some(settings.device.as_str());
-                let chunk = susurro_adapters_audio::record_pipewire(1, target)
-                    .map_err(|e| format!("Couldn't capture audio. Check mic: {e}"))?;
-                let tail = susurro_adapters_audio::trim_transient(&chunk);
-                animate_levels(app.clone(), tail.to_vec());
-                let d = endpoint.push(tail, 1.0);
-                all.extend_from_slice(&chunk);
-                if d == EndpointDecision::EndOfSpeech {
-                    cues.play(susurro_adapters_audio::Cue::Stop);
-                    break;
-                }
-            }
-        } else {
-            let target = (!settings.device.is_empty()).then_some(settings.device.as_str());
-            all = susurro_adapters_audio::record_pipewire(settings.seconds.clamp(1, 30), target)
-                .map_err(|e| format!("Couldn't capture audio. Check mic: {e}"))?;
-            animate_levels(app.clone(), all.clone());
-        }
-        if all.is_empty() {
-            let msg = "Captured zero samples. Is the mic muted?";
-            cues.play(susurro_adapters_audio::Cue::Error);
-            emit_error(app, msg);
-            return Err(msg.into());
-        }
-        all
-    };
+    let pcm = capture_pcm(app, settings, &cues)?;
 
     emit_state(app, "processing");
     let stt = susurro_adapters_stt_local::WhisperLocal::base_en(
@@ -426,28 +493,39 @@ fn start_dictation(
     run_dictation(&app, &settings, &tickets)
 }
 
-/// Background Hyprland socket listener: each hotkey press dictates.
+/// Background hotkey listener: each press dictates. The source is
+/// platform-owned: Hyprland socket on Linux, RegisterHotKey on
+/// Windows. Anything else sleeps instead of spinning.
 fn spawn_hotkey_listener(app: AppHandle, state: Arc<AppState>) {
     use susurro_core::ports::GlobalHotkeyPort;
     std::thread::spawn(move || {
-        let socket_path = state
-            .settings
-            .lock()
-            .map(|s| s.socket_path.clone())
-            .unwrap_or_else(|_| "/tmp/susurro.sock".into());
-        let socket = susurro_adapters_linux::HyprlandSocket::new(&socket_path);
+        #[cfg(target_os = "linux")]
+        let hotkey: Box<dyn GlobalHotkeyPort> = {
+            let socket_path = state
+                .settings
+                .lock()
+                .map(|s| s.socket_path.clone())
+                .unwrap_or_else(|_| "/tmp/susurro.sock".into());
+            Box::new(susurro_adapters_linux::HyprlandSocket::new(&socket_path))
+        };
+        #[cfg(target_os = "windows")]
+        let hotkey: Box<dyn GlobalHotkeyPort> =
+            Box::new(susurro_adapters_windows::WindowsHotkey::with_defaults());
+        #[cfg(not(any(target_os = "linux", target_os = "windows")))]
+        let hotkey: Box<dyn GlobalHotkeyPort> = {
+            // No listener here: sleep forever instead of hot-spinning.
+            loop {
+                std::thread::sleep(std::time::Duration::from_secs(3600));
+            }
+        };
         let tickets = TicketRegistry::new();
         loop {
-            if socket.wait_for_hotkey().is_err() {
+            if hotkey.wait_for_hotkey().is_err() {
                 std::thread::sleep(std::time::Duration::from_secs(1));
                 continue;
             }
             show_pill(&app, state.settings.lock().map(|s| s.sound).unwrap_or(true));
-            let settings = state
-                .settings
-                .lock()
-                .map(|s| s.clone())
-                .unwrap_or_default();
+            let settings = state.settings.lock().map(|s| s.clone()).unwrap_or_default();
             let _ = run_dictation(&app, &settings, &tickets);
         }
     });
@@ -473,11 +551,7 @@ fn build_tray(app: &AppHandle) -> Result<(), Box<dyn std::error::Error>> {
                 show_pill(app, sound);
                 std::thread::spawn(move || {
                     let state: State<'_, Arc<AppState>> = handle.state();
-                    let settings = state
-                        .settings
-                        .lock()
-                        .map(|s| s.clone())
-                        .unwrap_or_default();
+                    let settings = state.settings.lock().map(|s| s.clone()).unwrap_or_default();
                     let tickets = TicketRegistry::new();
                     let _ = run_dictation(&handle, &settings, &tickets);
                 });

@@ -21,7 +21,7 @@ jobs:
           - os: ubuntu-22.04
             args: "--bundles appimage,deb"
           - os: windows-latest
-            args: "--bundles nsis"
+            args: "--bundles msi,nsis"
     runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@v4
@@ -57,12 +57,12 @@ jobs:
             - See the milestone changelog and open issues on the repo for scope.
 
             Assets
-            - Linux: AppImage and .deb. Windows: NSIS setup. Standalone CLI: susurro (Linux) and susurro.exe (Windows).
+            - Linux: AppImage and .deb. Windows: MSI plus NSIS setup. Standalone CLI: susurro (Linux) and susurro.exe (Windows).
             - latest.json powers the in-app updater. Settings checks quietly and never forces a modal.
 
             Install
             - Linux: run the AppImage or install the .deb, then install whisper-cli, a whisper model, wl-copy, ydotool with ydotoold running, and socat for paste.
-            - Windows: run the setup, then use the CLI with --stdout until v0.6.0 adapters land.
+            - Windows: run the MSI or the setup, then use Win+Shift+R to dictate with the iGPU encoder where present.
             - Run susurro doctor to verify mic, tools, model, and updater reachability.
 
             Verify
