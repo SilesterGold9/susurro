@@ -405,10 +405,7 @@ fn run_dictation(
     let focused = susurro_adapters_linux::focused_app();
     #[cfg(not(target_os = "linux"))]
     let focused: Option<String> = None;
-    let _ = app.emit(
-        "susurro://context",
-        serde_json::json!({ "app": focused }),
-    );
+    let _ = app.emit("susurro://context", serde_json::json!({ "app": focused }));
     let cues = susurro_adapters_audio::CuePlayer::new(settings.sound);
 
     let pcm = capture_pcm(app, settings, &cues)?;
@@ -501,6 +498,9 @@ struct DragAnchor {
     y: i32,
 }
 
+/// hyprctl client list as JSON. Linux-only: the drag path below is
+/// the sole caller.
+#[cfg(target_os = "linux")]
 fn hyprland_clients() -> Result<serde_json::Value, String> {
     let out = std::process::Command::new("hyprctl")
         .args(["clients", "-j"])
@@ -512,11 +512,12 @@ fn hyprland_clients() -> Result<serde_json::Value, String> {
             String::from_utf8_lossy(&out.stderr).trim()
         ));
     }
-    serde_json::from_slice(&out.stdout)
-        .map_err(|e| format!("hyprctl returned non-JSON: {e}"))
+    serde_json::from_slice(&out.stdout).map_err(|e| format!("hyprctl returned non-JSON: {e}"))
 }
 
 /// Find our pill window: Wayland app id first, title fallback.
+/// Linux-only with its callers.
+#[cfg(target_os = "linux")]
 fn pill_address(clients: &serde_json::Value) -> Option<(String, i32, i32)> {
     clients.as_array()?.iter().find_map(|c| {
         let class = c.get("class")?.as_str()?;
@@ -532,6 +533,7 @@ fn pill_address(clients: &serde_json::Value) -> Option<(String, i32, i32)> {
     })
 }
 
+#[cfg(target_os = "linux")]
 fn hyprland_move(address: &str, x: i32, y: i32) -> Result<(), String> {
     // Argv shape proven live: address rides the last param after a comma.
     let out = std::process::Command::new("hyprctl")
@@ -560,12 +562,14 @@ fn hyprland_move(address: &str, x: i32, y: i32) -> Result<(), String> {
 #[tauri::command]
 fn pill_drag_start() -> Result<DragAnchor, String> {
     #[cfg(not(target_os = "linux"))]
-    return Err("Hyprland drag needs Linux.".into());
+    {
+        Err("Hyprland drag needs Linux.".into())
+    }
     #[cfg(target_os = "linux")]
     {
         let clients = hyprland_clients()?;
-        let (address, x, y) =
-            pill_address(&clients).ok_or_else(|| "pill window not found in hyprctl clients.".to_string())?;
+        let (address, x, y) = pill_address(&clients)
+            .ok_or_else(|| "pill window not found in hyprctl clients.".to_string())?;
         hyprland_move(&address, x, y)?;
         Ok(DragAnchor { address, x, y })
     }
@@ -577,7 +581,7 @@ fn pill_drag_move(address: String, x: i32, y: i32) -> Result<(), String> {
     #[cfg(not(target_os = "linux"))]
     {
         let _ = (address, x, y);
-        return Err("Hyprland drag needs Linux.".into());
+        Err("Hyprland drag needs Linux.".into())
     }
     #[cfg(target_os = "linux")]
     {
