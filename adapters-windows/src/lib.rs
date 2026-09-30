@@ -76,7 +76,7 @@ impl GlobalHotkeyPort for WindowsHotkey {
                     RegisterHotKey, UnregisterHotKey,
                 };
                 use windows_sys::Win32::UI::WindowsAndMessaging::{GetMessageW, MSG, WM_HOTKEY};
-                if RegisterHotKey(0, HOTKEY_ID, self.modifiers, self.vk) == 0 {
+                if RegisterHotKey(std::ptr::null_mut(), HOTKEY_ID, self.modifiers, self.vk) == 0 {
                     return Err(CoreError::Config(format!(
                         "RegisterHotKey failed (in use?). Pick another hotkey: {}",
                         windows_sys::Win32::Foundation::GetLastError()
@@ -84,23 +84,23 @@ impl GlobalHotkeyPort for WindowsHotkey {
                 }
                 let mut msg = std::mem::zeroed::<MSG>();
                 loop {
-                    let ret = GetMessageW(&mut msg, 0, 0, 0);
+                    let ret = GetMessageW(&mut msg, std::ptr::null_mut(), 0, 0);
                     if ret == 0 {
                         // WM_QUIT: unregister and report, never hang.
-                        UnregisterHotKey(0, HOTKEY_ID);
+                        UnregisterHotKey(std::ptr::null_mut(), HOTKEY_ID);
                         return Err(CoreError::Config(
                             "hotkey loop got WM_QUIT. Restart the daemon.".into(),
                         ));
                     }
                     if ret == -1 {
-                        UnregisterHotKey(0, HOTKEY_ID);
+                        UnregisterHotKey(std::ptr::null_mut(), HOTKEY_ID);
                         return Err(CoreError::Config(format!(
                             "hotkey pump failed: {}",
                             windows_sys::Win32::Foundation::GetLastError()
                         )));
                     }
                     if msg.message == WM_HOTKEY {
-                        UnregisterHotKey(0, HOTKEY_ID);
+                        UnregisterHotKey(std::ptr::null_mut(), HOTKEY_ID);
                         return Ok(HotkeyEvent::ToggleDictation);
                     }
                 }
@@ -241,10 +241,15 @@ mod tests {
                 RegisterHotKey, UnregisterHotKey,
             };
             assert_ne!(
-                RegisterHotKey(0, HOTKEY_ID, DEFAULT_MODIFIERS_WIN, DEFAULT_VK_R),
+                RegisterHotKey(
+                    std::ptr::null_mut(),
+                    HOTKEY_ID,
+                    DEFAULT_MODIFIERS_WIN,
+                    DEFAULT_VK_R
+                ),
                 0
             );
-            assert_ne!(UnregisterHotKey(0, HOTKEY_ID), 0);
+            assert_ne!(UnregisterHotKey(std::ptr::null_mut(), HOTKEY_ID), 0);
         }
     }
 }
