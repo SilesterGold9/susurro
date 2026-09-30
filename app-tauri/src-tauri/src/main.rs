@@ -30,7 +30,7 @@ impl Default for Settings {
     fn default() -> Self {
         Self {
             seconds: 30,
-            auto_stop: false,
+            auto_stop: true,
             sound: true,
             cleanup: "ollama".into(),
             ollama_model: "qwen3:0.6b".into(),
@@ -258,9 +258,9 @@ fn show_pill(app: &AppHandle, sound: bool) {
         if let Some(m) = monitor {
             let scale = m.scale_factor();
             let size = m.size().to_logical::<f64>(scale);
-            // Window is 364x64 logical; place center-x, ~88% down.
-            let x = size.width / 2.0 - 364.0 / 2.0;
-            let y = size.height * 0.88;
+            // Window is 420x72 logical; place center-x, ~90% down.
+            let x = size.width / 2.0 - 420.0 / 2.0;
+            let y = size.height * 0.90;
             let _ = w.set_position(tauri::Position::Logical(tauri::LogicalPosition { x, y }));
         } else {
             eprintln!("pill: no monitor found, showing at default position");

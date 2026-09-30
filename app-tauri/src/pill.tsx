@@ -9,8 +9,8 @@ type ProgressTick = { stage: string; value: number };
 
 const SLICES = 48;
 const BARS = 7;
-const WAVE_W = 180;
-const WAVE_H = 28;
+const WAVE_W = 200;
+const WAVE_H = 30;
 const SCALE = 2; // fixed 2x backing store, crisp on hidpi with no layout reads
 const ATTACK_MS = 10;
 const RELEASE_MS = 160;
@@ -44,7 +44,21 @@ function RollDigit({ value }: { value: string }) {
   const n = value >= "0" && value <= "9" ? value.charCodeAt(0) - 48 : -1;
   const pos = useRef(10);
   const colRef = useRef<HTMLSpanElement>(null);
-  const blurTimer = useRef<number>(0);
+  // Blur clears on transition end, not on a timer: the end event is
+  // the roll actually finishing, so a stuck number can never keep a
+  // stuck blur. Reduced motion skips the blur outright.
+  useLayoutEffect(() => {
+    const el = colRef.current;
+    if (!el) return;
+    const reduce =
+      typeof window !== "undefined" &&
+      window.matchMedia("(prefers-reduced-motion: reduce)").matches;
+    const onEnd = (e: TransitionEvent) => {
+      if (e.propertyName === "transform") el.style.filter = "";
+    };
+    el.addEventListener("transitionend", onEnd);
+    return () => el.removeEventListener("transitionend", onEnd);
+  }, []);
   useLayoutEffect(() => {
     if (n < 0) return;
     const el = colRef.current;
@@ -63,12 +77,10 @@ function RollDigit({ value }: { value: string }) {
       pos.current = next;
     }
     el.style.transform = `translateY(${-pos.current}em)`;
-    el.style.filter = "blur(1px)";
-    window.clearTimeout(blurTimer.current);
-    blurTimer.current = window.setTimeout(() => {
-      if (colRef.current) colRef.current.style.filter = "";
-    }, 450);
-    return () => window.clearTimeout(blurTimer.current);
+    const reduce =
+      typeof window !== "undefined" &&
+      window.matchMedia("(prefers-reduced-motion: reduce)").matches;
+    el.style.filter = reduce ? "" : "blur(1px)";
   }, [value]);
   if (n < 0) return <span className="rdigit-static">{value}</span>;
   return (
@@ -189,45 +201,34 @@ export default function Pill() {
   }, [state]);
 
   // Transient state flash: the resting row is avatar, wave, and
-  // timer only. Words appear centered over the wave on change, fade
-  // in, and leave after 1.6s. Errors and the first-run hint stick
-  // until the next run because they carry instructions.
-  type Flash = { text: string; key: number; sticky: boolean };
+  // timer only. Errors and the first-run hint stick until the next
+  // run because they carry instructions; done shows no words at
+  // all, the check plus settle already said it.
+  type Flash = { text: string; key: number };
   const [flash, setFlash] = useState<Flash | null>(null);
   useEffect(() => {
-    if (state === "listening" || state === "processing") {
+    if (state === "listening" || state === "processing" || state === "done") {
       setFlash(null);
       return;
     }
-    if (state === "done") {
-      setFlash({ text: "pasted", key: Date.now(), sticky: false });
-      return;
-    }
     if (state === "error") {
-      setFlash({ text: (errorMsg || "couldn't paste").slice(0, 64), key: Date.now(), sticky: true });
+      setFlash({ text: (errorMsg || "couldn't paste").slice(0, 64), key: Date.now() });
       return;
     }
     if (!lastText) {
-      setFlash({ text: "press super shift d", key: 0, sticky: true });
+      setFlash({ text: "press super shift d", key: 0 });
     } else {
       setFlash(null);
     }
   }, [state, errorMsg, lastText]);
-  useEffect(() => {
-    if (!flash || flash.sticky) return;
-    const id = window.setTimeout(() => setFlash((f) => (f && f.key === flash.key ? null : f)), 1600);
-    return () => window.clearTimeout(id);
-  }, [flash]);
 
-  // Dictation timer: runs from listening through processing, holds
-  // the total on done and error, resets on a new run. Tick is coarse
-  // (250ms) because the canvas loop already owns per-frame work.
+  // Dictation timer: runs while recording only, so the number is
+  // the take length. Freezes the moment capture ends; processing
+  // and done hold the total, a new run resets it.
   useEffect(() => {
     if (state === "listening") {
       startedAt.current = Date.now();
       setElapsed(0);
-    }
-    if (state === "listening" || state === "processing") {
       if (timerId.current) return;
       timerId.current = window.setInterval(() => {
         setElapsed(Date.now() - startedAt.current);
@@ -281,8 +282,10 @@ export default function Pill() {
       }
     }
     const morphTarget = stateRef.current === "processing" ? 1 : 0;
+    // Slow merge: bars ease into the fill over ~420ms so the states
+    // blend instead of cutting.
     morph.current +=
-      (morphTarget - morph.current) * (reduce ? 1 : Math.min(1, dt / 180));
+      (morphTarget - morph.current) * (reduce ? 1 : Math.min(1, dt / 420));
     draw(ts, reduce);
   }
 
@@ -344,12 +347,19 @@ export default function Pill() {
       } else {
         ctx.fillRect(0, WAVE_H / 2 - 3, w, 6);
       }
-      // Shimmer while the value stalls, frozen when reduced.
+      // Traveling glow while the value stalls: energy sweeping the
+      // fill instead of a hard shimmer box. Frozen when reduced.
       if (!reduce && progress.current < 1) {
-        const sx = ((ts / 8) % (WAVE_W + 40)) - 20;
-        ctx.globalAlpha = morph.current * 0.35;
-        ctx.fillStyle = "#ffffff";
-        ctx.fillRect(Math.min(sx, w - 8), WAVE_H / 2 - 3, 8, 6);
+        const span = WAVE_W + 80;
+        const t = (ts / 1400) % 2;
+        const gx = (t < 1 ? t : 2 - t) * span - 40;
+        const cy = WAVE_H / 2;
+        const grad = ctx.createRadialGradient(gx, cy, 0, gx, cy, 20);
+        grad.addColorStop(0, "rgba(255,255,255,0.5)");
+        grad.addColorStop(1, "rgba(255,255,255,0)");
+        ctx.globalAlpha = morph.current;
+        ctx.fillStyle = grad;
+        ctx.fillRect(Math.max(0, gx - 20), cy - 8, 40, 16);
       }
     }
     ctx.globalAlpha = 1;
@@ -393,7 +403,7 @@ export default function Pill() {
         >
           <Blobatar
             name={avatarName}
-            size={24}
+            size={30}
             traits={AVATAR_TRAITS}
             expression={state === "processing" ? thinking : idle}
           />

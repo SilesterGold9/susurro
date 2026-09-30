@@ -24,7 +24,7 @@ enum Cmd {
     },
     /// Record the mic once, transcribe with base.en, paste the result.
     Listen {
-        /// Max seconds to record (cap). With opt-in --auto-stop,
+        /// Max seconds to record (cap). With --auto-stop (default on),
         /// recording ends early on VAD end-of-speech instead of using
         /// the full window.
         #[arg(long, default_value_t = 30)]
@@ -43,9 +43,9 @@ enum Cmd {
         device: Option<String>,
         /// Stop recording on VAD end-of-speech (2s of silence after
         /// speech ends the utterance; --seconds only caps the wait).
-        /// Chunk gaps apply until v0.4.0 streaming. Off by default:
-        /// opt in when the mic cuts out too late, not too early.
-        #[arg(long, default_value_t = false, action = clap::ArgAction::Set, num_args = 0..=1, default_missing_value = "true")]
+        /// Chunk gaps apply until v0.4.0 streaming. On by default:
+        /// pass --auto-stop false to record fixed windows instead.
+        #[arg(long, default_value_t = true, action = clap::ArgAction::Set, num_args = 0..=1, default_missing_value = "true")]
         auto_stop: bool,
         /// UI earcons: start, end-of-speech, done, error. Cap-timeout
         /// stops stay silent so the two endings feel different.
@@ -87,9 +87,9 @@ enum Cmd {
         /// PipeWire target node. Defaults to the default source.
         #[arg(long)]
         device: Option<String>,
-        /// Stop recording on VAD end-of-speech. Off by default, same
-        /// as listen: opt in, never cut early.
-        #[arg(long, default_value_t = false, action = clap::ArgAction::Set, num_args = 0..=1, default_missing_value = "true")]
+        /// Stop recording on VAD end-of-speech. On by default, same
+        /// as listen: pass false for fixed windows.
+        #[arg(long, default_value_t = true, action = clap::ArgAction::Set, num_args = 0..=1, default_missing_value = "true")]
         auto_stop: bool,
         #[arg(long, default_value_t = true, action = clap::ArgAction::Set, num_args = 0..=1, default_missing_value = "true")]
         sound: bool,
@@ -244,8 +244,8 @@ fn main() -> anyhow::Result<()> {
             println!("    match:class = ^(susurro-app)$");
             println!("    match:title = ^(Susurro)$");
             println!("    float = true");
-            println!("    size = 364 64");
-            println!("    move = (monitor_w-364)/2 (monitor_h*0.88)");
+            println!("    size = 420 72");
+            println!("    move = (monitor_w-420)/2 (monitor_h*0.90)");
             println!("    pin = true");
             println!("    border_size = 0");
             println!("    rounding = 18");
