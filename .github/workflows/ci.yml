@@ -4,6 +4,12 @@ on:
   push:
   pull_request:
 
+# Rapid pushes cancel superseded runs: each push today queued a full
+# 5-minute matrix behind the previous one.
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
 jobs:
   lint-test:
     name: lint+test (${{ matrix.os }})
@@ -20,6 +26,9 @@ jobs:
       - uses: dtolnay/rust-toolchain@stable
         with:
           components: clippy, rustfmt
+      # Dependency compilation dominates this job (reqwest, keyring,
+      # cpal); the cache turns repeat pushes incremental.
+      - uses: Swatinem/rust-cache@v2
       - name: fmt check
         run: cargo fmt --all -- --check
       - name: clippy
@@ -44,6 +53,11 @@ jobs:
       - uses: dtolnay/rust-toolchain@stable
         with:
           components: clippy
+      # Separate workspace (excluded from the root one) with its own
+      # lockfile: cache it explicitly or every run rebuilds tauri.
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: app-tauri/src-tauri
       - uses: actions/setup-node@v4
         with:
           node-version: 22
