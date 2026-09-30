@@ -7,3 +7,4 @@ license.workspace = true
 [dependencies]
 susurro-core.workspace = true
 serde_json.workspace = true
+reqwest = { version = "0.12", default-features = false, features = ["blocking", "http2", "multipart", "rustls-tls"] }

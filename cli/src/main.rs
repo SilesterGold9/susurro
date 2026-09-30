@@ -1,7 +1,6 @@
 use clap::{Parser, Subcommand};
 use susurro_core::ports::{AudioCapturePort, AudioChunk, SpeechToTextPort};
 use susurro_core::{Pipeline, SessionId, TicketRegistry};
-use susurro_adapters_stt_cloud::{host_of, preresolve_host};
 
 #[derive(Parser)]
 #[command(
@@ -137,6 +136,10 @@ enum Cmd {
     PrivacyRemove { app: String },
     /// List apps forced to local-only STT.
     PrivacyList,
+    /// Benchmark CPU once and persist the model tier (tiny, base,
+    /// small). First listen benchmarks automatically; rerun this
+    /// after a hardware change.
+    Bench,
 }
 
 fn main() -> anyhow::Result<()> {
@@ -236,6 +239,7 @@ fn main() -> anyhow::Result<()> {
         Cmd::PrivacyAdd { app } => privacy_add(&app),
         Cmd::PrivacyRemove { app } => privacy_remove(&app),
         Cmd::PrivacyList => privacy_list(),
+        Cmd::Bench => bench(),
     }
 }
 
@@ -255,19 +259,47 @@ struct ListenOpts {
 }
 
 fn resolve_model(explicit: &Option<String>) -> String {
+    let env = std::env::var("SUSURRO_MODEL").ok();
+    let home = std::env::var("HOME").ok();
+    resolve_model_with(explicit, env.as_deref(), stored_tier(), home.as_deref())
+}
+
+/// Stored benchmark tier, if a previous run persisted one. Missing
+/// or broken reads as unset; dictation falls back to disk scan.
+fn stored_tier() -> Option<susurro_adapters_stt_local::bench::ModelTier> {
+    let store = susurro_storage::SqliteSettings::open(&db_path()).ok()?;
+    susurro_adapters_stt_local::bench::load_tier(&store)
+}
+
+/// Model resolution order: explicit --model, then SUSURRO_MODEL when
+/// it points at a real file, then the benchmark tier when its file
+/// is on disk, then the first model on disk. Extracted for tests;
+/// `home` stands in for $HOME so tests use temp dirs.
+fn resolve_model_with(
+    explicit: &Option<String>,
+    env_model: Option<&str>,
+    stored: Option<susurro_adapters_stt_local::bench::ModelTier>,
+    home: Option<&str>,
+) -> String {
     if let Some(m) = explicit {
         return shellexpand(m);
     }
-    if let Ok(m) = std::env::var("SUSURRO_MODEL") {
-        let p = shellexpand(&m);
+    if let Some(m) = env_model {
+        let p = shellexpand(m);
         if std::path::Path::new(&p).exists() {
             return p;
         }
     }
+    if let (Some(tier), Some(h)) = (stored, home) {
+        let p = tier.model_path(h);
+        if p.exists() {
+            return p.to_string_lossy().into_owned();
+        }
+    }
     // First model actually on disk wins; the error names base.en.
-    if let Ok(home) = std::env::var("HOME") {
+    if let Some(h) = home {
         for name in ["small.en.bin", "tiny.en.bin", "base.en.bin"] {
-            let p = std::path::PathBuf::from(&home)
+            let p = std::path::PathBuf::from(h)
                 .join(".local/share/susurro/models")
                 .join(name);
             if p.exists() {
@@ -365,6 +397,10 @@ fn doctor() -> anyhow::Result<()> {
             "missing — download base.en (see README)"
         }
     );
+    match stored_tier() {
+        Some(t) => println!("bench tier: {} ({})", t.as_str(), t.file_name()),
+        None => println!("bench tier: unset — first listen benchmarks, or run susurro bench"),
+    };
     println!("socket: /tmp/susurro.sock (Hyprland bind triggers it)");
     // Best-effort Ollama server + model probe for --cleanup ollama.
     match std::process::Command::new("curl")
@@ -653,6 +689,11 @@ fn run_utterance(opts: &ListenOpts, tickets: &TicketRegistry) -> anyhow::Result<
     // Only a VAD end plays the stop cue; cap-timeout stops stay silent.
     // Model and dictionary resolve before capture so the --live partial
     // decoder shares the exact config of the final decode below.
+    // First run without overrides benchmarks once (~200ms) and stores
+    // the tier; mock runs skip it, they need no model.
+    if !opts.mock {
+        ensure_bench_tier(&opts.model);
+    }
     let model_path = resolve_model(&opts.model);
     let dict_prompt = susurro_storage::SqliteDictionary::open(&db_path)
         .map(|d| d.prompt().unwrap_or_default())
@@ -1057,6 +1098,71 @@ fn privacy_list() -> anyhow::Result<()> {
     Ok(())
 }
 
+/// Benchmark CPU and persist the model tier (v0.4.0, issue 26).
+/// Prints the measured rate next to the pick so a surprising tier
+/// carries its evidence. A broken store degrades: the tier prints
+/// but only lasts for this run.
+fn bench() -> anyhow::Result<()> {
+    use susurro_adapters_stt_local::bench;
+    let (tier, probe) = bench::benchmark();
+    println!(
+        "cpu: {}M it/s across {} cores ({}ms probe)",
+        probe.iters_per_sec / 1_000_000,
+        probe.cores,
+        probe.elapsed_ms
+    );
+    println!("tier: {} ({})", tier.as_str(), tier.file_name());
+    match susurro_storage::SqliteSettings::open(&db_path()) {
+        Ok(mut store) => {
+            bench::store_tier(&mut store, tier)
+                .map_err(|e| anyhow::anyhow!("Couldn't save tier: {e}"))?;
+            println!("saved. The next listen uses it when its model file is on disk.");
+        }
+        Err(e) => println!("tier not saved (store degraded: {e})."),
+    }
+    Ok(())
+}
+
+/// First-run auto-benchmark: when no explicit model, no usable
+/// SUSURRO_MODEL, and no stored tier exist, probe once and persist
+/// the pick. Best-effort throughout: any failure prints degraded
+/// and dictation continues on the disk-scan fallback.
+fn ensure_bench_tier(explicit: &Option<String>) {
+    use susurro_adapters_stt_local::bench;
+    if explicit.is_some() {
+        return;
+    }
+    if let Ok(m) = std::env::var("SUSURRO_MODEL") {
+        if std::path::Path::new(&shellexpand(&m)).exists() {
+            return;
+        }
+    }
+    let mut store = match susurro_storage::SqliteSettings::open(&db_path()) {
+        Ok(s) => s,
+        Err(e) => {
+            eprintln!("bench store degraded (using disk scan): {e}");
+            return;
+        }
+    };
+    if bench::load_tier(&store).is_some() {
+        return;
+    }
+    let (tier, probe) = bench::benchmark();
+    if let Err(e) = bench::store_tier(&mut store, tier) {
+        eprintln!(
+            "bench store degraded (tier {} not saved): {e}",
+            tier.as_str()
+        );
+    }
+    eprintln!(
+        "bench: first run measured {}M it/s on {} cores, picked {} ({}). Rerun with: susurro bench",
+        probe.iters_per_sec / 1_000_000,
+        probe.cores,
+        tier.as_str(),
+        tier.file_name()
+    );
+}
+
 /// VAD auto-stop: record 1s chunks up to `opts.seconds`, ending early
 /// on end-of-speech. When `live` holds an STT, each chunk also asks it
 /// for a partial hypothesis printed for display; partials never touch
@@ -1176,5 +1282,76 @@ mod tests {
     fn mock_partial_empty_text_yields_none() {
         let stt = mock("   ");
         assert!(stt.transcribe_partial(&[0; 160]).is_none());
+    }
+
+    /// Temp HOME with the given model files present.
+    fn home_with(models: &[&str]) -> std::path::PathBuf {
+        let dir = std::env::temp_dir().join(format!(
+            "susurro-test-home-{}",
+            susurro_core::SessionId::generate()
+        ));
+        let models_dir = dir.join(".local/share/susurro/models");
+        std::fs::create_dir_all(&models_dir).unwrap();
+        for m in models {
+            std::fs::write(models_dir.join(m), b"fake").unwrap();
+        }
+        dir
+    }
+
+    #[test]
+    fn resolve_prefers_explicit_over_everything() {
+        use susurro_adapters_stt_local::bench::ModelTier;
+        let home = home_with(&["small.en.bin"]);
+        let h = home.to_string_lossy().into_owned();
+        let out = resolve_model_with(
+            &Some("/tmp/custom.bin".into()),
+            None,
+            Some(ModelTier::Small),
+            Some(&h),
+        );
+        assert_eq!(out, "/tmp/custom.bin");
+        let _ = std::fs::remove_dir_all(&home);
+    }
+
+    #[test]
+    fn resolve_uses_stored_tier_when_its_file_exists() {
+        use susurro_adapters_stt_local::bench::ModelTier;
+        // Stored base wins even though the scan prefers small.
+        let home = home_with(&["small.en.bin", "base.en.bin"]);
+        let h = home.to_string_lossy().into_owned();
+        let out = resolve_model_with(&None, None, Some(ModelTier::Base), Some(&h));
+        assert!(out.ends_with("base.en.bin"), "{out}");
+        let _ = std::fs::remove_dir_all(&home);
+    }
+
+    #[test]
+    fn resolve_skips_stored_tier_whose_file_is_missing() {
+        use susurro_adapters_stt_local::bench::ModelTier;
+        // Stored small has no file; scan falls back to tiny.
+        let home = home_with(&["tiny.en.bin"]);
+        let h = home.to_string_lossy().into_owned();
+        let out = resolve_model_with(&None, None, Some(ModelTier::Small), Some(&h));
+        assert!(out.ends_with("tiny.en.bin"), "{out}");
+        let _ = std::fs::remove_dir_all(&home);
+    }
+
+    #[test]
+    fn resolve_env_wins_over_stored_but_loses_to_explicit() {
+        use susurro_adapters_stt_local::bench::ModelTier;
+        let home = home_with(&["base.en.bin"]);
+        let h = home.to_string_lossy().into_owned();
+        let env_file = home.join("env.bin");
+        std::fs::write(&env_file, b"fake").unwrap();
+        let env = env_file.to_string_lossy().into_owned();
+        let out = resolve_model_with(&None, Some(&env), Some(ModelTier::Base), Some(&h));
+        assert_eq!(out, env);
+        let out = resolve_model_with(
+            &Some("/tmp/custom.bin".into()),
+            Some(&env),
+            Some(ModelTier::Base),
+            Some(&h),
+        );
+        assert_eq!(out, "/tmp/custom.bin");
+        let _ = std::fs::remove_dir_all(&home);
     }
 }

@@ -4,6 +4,8 @@
 //! - `SqliteHistory`: transcript history with idempotent upserts.
 //! - `SqliteTickets`: persistent exactly-once ticket claims.
 //! - `SqliteDictionary`: custom vocabulary list.
+//! - `SqliteSettings` (v0.4.0): persistent key-value settings
+//!   (benchmark tier today) implementing `SettingsStorePort`.
 //! - `keys` (v0.3.0): OS keyring for cloud API keys, env fallback.
 
 pub mod keys;
@@ -65,9 +67,13 @@ fn open_db(path: &std::path::Path) -> Result<rusqlite::Connection, CoreError> {
          CREATE TABLE IF NOT EXISTS dictionary (
            phrase TEXT PRIMARY KEY
          );
-         CREATE TABLE IF NOT EXISTS privacy_apps (
-           app TEXT PRIMARY KEY
-         );",
+          CREATE TABLE IF NOT EXISTS privacy_apps (
+            app TEXT PRIMARY KEY
+          );
+          CREATE TABLE IF NOT EXISTS kv (
+            key TEXT PRIMARY KEY,
+            value TEXT NOT NULL
+          );",
     )
     .map_err(|e| CoreError::Storage(format!("Couldn't migrate db: {e}")))?;
     Ok(conn)
@@ -326,6 +332,54 @@ impl SqlitePrivacy {
     }
 }
 
+/// Persistent key-value settings (v0.4.0, issue 26).
+/// One `kv` row per key, upserted. Backs the benchmark tier so the
+/// first-run pick survives restarts. Failures surface as Storage
+/// errors; callers degrade, never block dictation on them.
+pub struct SqliteSettings {
+    conn: std::sync::Mutex<rusqlite::Connection>,
+}
+
+impl SqliteSettings {
+    pub fn open(path: &std::path::Path) -> Result<Self, CoreError> {
+        Ok(Self {
+            conn: std::sync::Mutex::new(open_db(path)?),
+        })
+    }
+}
+
+impl SettingsStorePort for SqliteSettings {
+    fn get(&self, key: &str) -> Result<Option<String>, CoreError> {
+        let conn = self
+            .conn
+            .lock()
+            .map_err(|e| CoreError::Storage(format!("db lock poisoned: {e}")))?;
+        let mut stmt = conn
+            .prepare("SELECT value FROM kv WHERE key = ?1")
+            .map_err(|e| CoreError::Storage(e.to_string()))?;
+        let mut rows = stmt
+            .query_map(rusqlite::params![key], |row| row.get(0))
+            .map_err(|e| CoreError::Storage(e.to_string()))?;
+        match rows.next() {
+            Some(v) => Ok(Some(v.map_err(|e| CoreError::Storage(e.to_string()))?)),
+            None => Ok(None),
+        }
+    }
+
+    fn set(&mut self, key: &str, value: &str) -> Result<(), CoreError> {
+        self.conn
+            .lock()
+            .map_err(|e| CoreError::Storage(format!("db lock poisoned: {e}")))?
+            .execute(
+                "INSERT INTO kv (key, value) VALUES (?1, ?2)
+                 ON CONFLICT(key) DO UPDATE SET value = excluded.value",
+                rusqlite::params![key, value],
+            )
+            .map_err(|e| CoreError::Storage(e.to_string()))?;
+        Ok(())
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -398,6 +452,24 @@ mod tests {
         store.remove("kitty").unwrap();
         assert!(!store.list().unwrap().contains(&"kitty".to_string()));
         assert!(!store.policy().unwrap().is_local_only(Some("kitty")));
+        let _ = std::fs::remove_file(&p);
+    }
+
+    #[test]
+    fn settings_roundtrip_and_overwrite() {
+        use susurro_core::ports::SettingsStorePort;
+        let p = tmp_path("settings");
+        let mut s = SqliteSettings::open(&p).unwrap();
+        assert_eq!(s.get("model_tier").unwrap(), None);
+        s.set("model_tier", "base").unwrap();
+        assert_eq!(s.get("model_tier").unwrap().as_deref(), Some("base"));
+        // Overwrite converges; missing keys read as None.
+        s.set("model_tier", "small").unwrap();
+        assert_eq!(s.get("model_tier").unwrap().as_deref(), Some("small"));
+        assert_eq!(s.get("nope").unwrap(), None);
+        // New handle on the same db sees the value.
+        let s2 = SqliteSettings::open(&p).unwrap();
+        assert_eq!(s2.get("model_tier").unwrap().as_deref(), Some("small"));
         let _ = std::fs::remove_file(&p);
     }
 }

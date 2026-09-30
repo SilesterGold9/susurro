@@ -9,11 +9,16 @@
 //!   live feedback. Decodes at most the trailing window on a cadence,
 //!   so extra CPU stays flat regardless of utterance length. Partials
 //!   are display-only; the final full decode decides the transcript.
+//! - `bench` (v0.4.0): hardware auto-benchmark to model tier
+//!   selection. First run probes CPU throughput and persists the
+//!   tier; later runs reuse it.
 
 use std::path::PathBuf;
 use std::process::Command;
 use susurro_core::ports::{SpeechToTextPort, Transcript};
 use susurro_core::CoreError;
+
+pub mod bench;
 
 pub struct MockStt {
     pub text: String,
