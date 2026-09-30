@@ -54,7 +54,9 @@ jobs:
             Talk-to-text that works even when the internet does not.
 
             What's inside
-            - Local STT by default (whisper.cpp base.en on CPU), optional cloud when online.
+            - Local STT by default (whisper.cpp on CPU, iGPU encoder where OpenVINO is present), optional cloud when online.
+            - First-run benchmark picks the model tier; stt-bench races backends with winner default.
+            - Windows port: Win+Shift+R hotkey, SendInput paste, MSI plus NSIS installers.
             - Pill overlay with live waveform, staged progress, and sound cues.
             - SQLite history, persistent tickets, custom dictionary, fail-open cleanup.
             - See the milestone changelog and open issues on the repo for scope.
