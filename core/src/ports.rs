@@ -58,6 +58,11 @@ pub trait TextInjectionPort: Send + Sync {
     /// Paste-based injection (never per-key at scale).
     /// Must be idempotent per ticket — see `TicketRegistry`.
     fn inject(&self, text: &str, ticket: &crate::Ticket) -> Result<(), crate::CoreError>;
+    /// Semantic undo (v0.8.0, issue 39): select the `text` span the
+    /// last session injected, ending at the caret, and delete it.
+    /// Selection runs on char count, so empty text is a no-op that
+    /// never touches a tool. Real text needs the platform injector.
+    fn remove_last(&self, text: &str, ticket: &crate::Ticket) -> Result<(), crate::CoreError>;
 }
 
 #[derive(Debug, Clone)]
@@ -98,6 +103,9 @@ pub struct HistoryEntry {
 pub trait HistoryStorePort: Send + Sync {
     /// Idempotent upsert keyed by session id.
     fn upsert(&mut self, entry: HistoryEntry) -> Result<(), crate::CoreError>;
+    /// Delete one session (semantic undo consumes entries so a
+    /// repeated undo walks back instead of deleting twice).
+    fn remove(&mut self, session: crate::SessionId) -> Result<(), crate::CoreError>;
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

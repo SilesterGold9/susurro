@@ -110,6 +110,36 @@ fn try_wtype(text: &str) -> WtypeOutcome {
     }
 }
 
+/// wtype removal for `text`: hold shift, tap Left once per char to
+/// select the injected span ending at the caret, release shift, tap
+/// BackSpace to delete the selection. Argv carries no shell.
+#[cfg(target_os = "linux")]
+fn wtype_remove_command(text: &str) -> std::process::Command {
+    let mut cmd = std::process::Command::new("wtype");
+    cmd.arg("-M").arg("shift");
+    for _ in text.chars() {
+        cmd.arg("-k").arg("Left");
+    }
+    cmd.arg("-m").arg("shift").arg("-k").arg("BackSpace");
+    cmd
+}
+
+/// ydotool removal argv in one batched sequence: shift down (42),
+/// Left down/up (105) per char, shift up, BackSpace down/up (14).
+/// Keycodes, never names: ydotool >= 1.0 no-ops on names.
+#[cfg(target_os = "linux")]
+fn ydotool_remove_args(text: &str) -> Vec<String> {
+    let mut args = vec!["key".to_string(), "42:1".to_string()];
+    for _ in text.chars() {
+        args.push("105:1".to_string());
+        args.push("105:0".to_string());
+    }
+    args.push("42:0".to_string());
+    args.push("14:1".to_string());
+    args.push("14:0".to_string());
+    args
+}
+
 impl TextInjectionPort for LinuxPasteInjector {
     fn inject(&self, text: &str, _ticket: &Ticket) -> Result<(), CoreError> {
         // Empty injection is a no-op on every platform, matching the
@@ -180,8 +210,52 @@ impl TextInjectionPort for LinuxPasteInjector {
             Ok(())
         }
     }
+    fn remove_last(&self, text: &str, _ticket: &Ticket) -> Result<(), CoreError> {
+        // Empty removal is a no-op on every platform, matching the
+        // Windows injector and the port contract. Real text needs tools.
+        if text.is_empty() {
+            return Ok(());
+        }
+        #[cfg(not(target_os = "linux"))]
+        {
+            Err(CoreError::Injection(
+                "Linux removal is Linux-only. Expected on Windows CI.".into(),
+            ))
+        }
+        #[cfg(target_os = "linux")]
+        {
+            use std::process::Command;
+            if self.use_ydotool {
+                match wtype_remove_command(text).status() {
+                    Err(_) => {}
+                    Ok(status) if status.success() => return Ok(()),
+                    Ok(status) => {
+                        return Err(CoreError::Injection(format!(
+                            "wtype exited with {status}. Check compositor virtual-keyboard support."
+                        )));
+                    }
+                }
+            }
+            // Fallback: one batched ydotool key sequence. Runtime
+            // failure errors instead of trying anything else: a half
+            // selection must never be followed by a blind delete.
+            let status = Command::new("ydotool")
+                .args(ydotool_remove_args(text))
+                .status()
+                .map_err(|e| {
+                    CoreError::Injection(format!(
+                        "Couldn't run wtype or ydotool. Install one and retry: {e}"
+                    ))
+                })?;
+            if !status.success() {
+                return Err(CoreError::Injection(
+                    "ydotool remove failed. Is ydotoold running? See `susurro doctor`.".into(),
+                ));
+            }
+            Ok(())
+        }
+    }
 }
-
 /// Scripted hotkey for tests and CI: replays a press queue in order.
 /// Each `wait_for_hotkey` pops one press. An empty queue returns a
 /// config error so daemon loops stay deterministic in tests.
@@ -209,15 +283,18 @@ impl GlobalHotkeyPort for ScriptedHotkey {
     }
 }
 
-/// Hardware-free injector for tests: records what would be pasted.
+/// Hardware-free injector for tests: records what would be pasted
+/// and removed.
 pub struct MockInjector {
     pub seen: std::sync::Mutex<Vec<String>>,
+    pub removed: std::sync::Mutex<Vec<String>>,
 }
 
 impl MockInjector {
     pub fn new() -> Self {
         Self {
             seen: Default::default(),
+            removed: Default::default(),
         }
     }
 }
@@ -231,6 +308,10 @@ impl Default for MockInjector {
 impl TextInjectionPort for MockInjector {
     fn inject(&self, text: &str, _ticket: &Ticket) -> Result<(), CoreError> {
         self.seen.lock().unwrap().push(text.to_string());
+        Ok(())
+    }
+    fn remove_last(&self, text: &str, _ticket: &Ticket) -> Result<(), CoreError> {
+        self.removed.lock().unwrap().push(text.to_string());
         Ok(())
     }
 }
@@ -323,6 +404,33 @@ mod tests {
         assert!(dbg.contains("wtype"), "{dbg}");
         assert!(dbg.contains("\"--\""), "{dbg}");
         assert!(dbg.contains("hello -- world"), "{dbg}");
+    }
+
+    #[test]
+    #[cfg(target_os = "linux")]
+    fn wtype_remove_selects_span_then_deletes() {
+        let dbg = format!("{:?}", super::wtype_remove_command("hi"));
+        assert!(dbg.contains("\"-M\""), "{dbg}");
+        assert!(dbg.contains("\"shift\""), "{dbg}");
+        // One Left per char, then release plus BackSpace.
+        assert_eq!(dbg.matches("\"Left\"").count(), 2, "{dbg}");
+        assert!(dbg.contains("\"BackSpace\""), "{dbg}");
+        assert!(dbg.contains("\"-m\""), "{dbg}");
+    }
+
+    #[test]
+    #[cfg(target_os = "linux")]
+    fn ydotool_remove_batches_shift_left_backspace() {
+        let args = super::ydotool_remove_args("hi");
+        assert_eq!(args[0], "key");
+        assert_eq!(args[1], "42:1");
+        // Two chars: two Left down/up pairs, then shift up, BackSpace.
+        assert_eq!(
+            &args[2..8],
+            &["105:1", "105:0", "105:1", "105:0", "42:0", "14:1"]
+        );
+        assert_eq!(args[args.len() - 1], "14:0");
+        assert!(super::ydotool_remove_args("").len() > 3);
     }
 
     #[test]

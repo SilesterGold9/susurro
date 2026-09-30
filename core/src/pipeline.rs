@@ -162,10 +162,15 @@ mod tests {
 
     struct MockInject {
         pub seen: std::sync::Mutex<Vec<String>>,
+        pub removed: std::sync::Mutex<Vec<String>>,
     }
     impl TextInjectionPort for MockInject {
         fn inject(&self, text: &str, _t: &Ticket) -> Result<(), crate::CoreError> {
             self.seen.lock().unwrap().push(text.to_string());
+            Ok(())
+        }
+        fn remove_last(&self, text: &str, _t: &Ticket) -> Result<(), crate::CoreError> {
+            self.removed.lock().unwrap().push(text.to_string());
             Ok(())
         }
     }
@@ -181,6 +186,7 @@ mod tests {
         };
         let inject = MockInject {
             seen: Default::default(),
+            removed: Default::default(),
         };
         let reg = TicketRegistry::new();
         let out = run_once(
@@ -212,6 +218,7 @@ mod tests {
         };
         let inject = MockInject {
             seen: Default::default(),
+            removed: Default::default(),
         };
         let err = run_once(
             &mut cap,
@@ -243,6 +250,7 @@ mod tests {
         };
         let inject = MockInject {
             seen: Default::default(),
+            removed: Default::default(),
         };
         let out = run_once(
             &mut cap,
@@ -269,6 +277,7 @@ mod tests {
         };
         let inject = MockInject {
             seen: Default::default(),
+            removed: Default::default(),
         };
         let seen = RefCell::new(Vec::new());
         run_staged(

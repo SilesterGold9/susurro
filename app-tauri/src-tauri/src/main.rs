@@ -223,6 +223,16 @@ impl TextInjectionPort for GuiInjector {
         #[cfg(not(target_os = "windows"))]
         return susurro_adapters_linux::LinuxPasteInjector::new().inject(text, ticket);
     }
+    fn remove_last(
+        &self,
+        text: &str,
+        ticket: &susurro_core::Ticket,
+    ) -> Result<(), susurro_core::CoreError> {
+        #[cfg(target_os = "windows")]
+        return susurro_adapters_windows::WindowsSendInput.remove_last(text, ticket);
+        #[cfg(not(target_os = "windows"))]
+        return susurro_adapters_linux::LinuxPasteInjector::new().remove_last(text, ticket);
+    }
 }
 
 fn emit_state(app: &AppHandle, s: &str) {

@@ -164,6 +164,10 @@ enum Cmd {
         #[arg(default_value = "")]
         session: String,
     },
+    /// Remove the last injected session from the focused app.
+    /// Repeat to walk further back. Saying "scratch that" dictates
+    /// the same undo hands-free.
+    Undo,
 }
 
 fn main() -> anyhow::Result<()> {
@@ -270,6 +274,7 @@ fn main() -> anyhow::Result<()> {
         Cmd::Bench => bench(),
         Cmd::SttBench => stt_bench(),
         Cmd::Replay { session } => replay(&session),
+        Cmd::Undo => undo(),
     }
 }
 
@@ -909,6 +914,14 @@ impl susurro_core::ports::TextInjectionPort for StdoutInjector {
         println!("injected: {text}");
         Ok(())
     }
+    fn remove_last(
+        &self,
+        text: &str,
+        _t: &susurro_core::Ticket,
+    ) -> Result<(), susurro_core::CoreError> {
+        println!("removed: {text}");
+        Ok(())
+    }
 }
 
 /// Owned live-partial decoder for the record loop (v0.4.0, issue 23).
@@ -979,6 +992,10 @@ fn listen_once(mock_text: &str) -> anyhow::Result<()> {
         SessionId::generate(),
     )
     .map_err(|e| anyhow::anyhow!("{e}"))?;
+    if is_scratch_that(&out.raw_text) || is_scratch_that(&out.cleaned_text) {
+        eprintln!("scratch that heard. Undoing last session.");
+        return undo_last_session(&StdoutInjector);
+    }
     eprintln!("raw: {}", out.raw_text);
     Ok(())
 }
@@ -1301,6 +1318,15 @@ fn run_utterance(opts: &ListenOpts, tickets: &TicketRegistry) -> anyhow::Result<
     eprintln!("raw: {}", out.raw_text);
     eprintln!("cleaned: {}", out.cleaned_text);
 
+    // Scratch-that (v0.8.0, issue 39): the transcript is a command,
+    // not dictation. Undo the previous session instead of injecting,
+    // and keep this session out of history.
+    if is_scratch_that(&out.raw_text) || is_scratch_that(&out.cleaned_text) {
+        eprintln!("scratch that heard. Undoing last session.");
+        log_event(session, susurro_core::EventKind::Done, "scratch-that");
+        return undo_last_session(inject);
+    }
+
     // History (#14): idempotent upsert, best-effort so a broken db
     // never blocks dictation. Chain reports the winning provider (#19).
     let latency_ms = t0.elapsed().as_millis() as u64;
@@ -1407,6 +1433,84 @@ fn replay(session: &str) -> anyhow::Result<()> {
         }
     }
     Ok(())
+}
+
+/// True when the transcript asks for an undo instead of dictation:
+/// "scratch that", case-insensitive, with trailing punctuation
+/// tolerated (cleanup may punctuate it). Checked against raw and
+/// cleaned text; anything longer is dictation, not a command.
+fn is_scratch_that(text: &str) -> bool {
+    let t = text.trim().trim_end_matches(['.', '!', '?']).trim();
+    t.eq_ignore_ascii_case("scratch that")
+}
+
+/// Undo the most recent history session: select its span ending at
+/// the caret and delete it, then consume the entry so a repeat undo
+/// walks further back. Best-effort store handling like everything
+/// else; removal failure is a real error with the fix attached.
+fn undo_last_session(inject: &dyn susurro_core::ports::TextInjectionPort) -> anyhow::Result<()> {
+    use susurro_core::ports::HistoryStorePort;
+    let mut history = susurro_storage::SqliteHistory::open(&db_path())
+        .map_err(|e| anyhow::anyhow!("Couldn't open history: {e}"))?;
+    let entries = history
+        .recent(1)
+        .map_err(|e| anyhow::anyhow!("Couldn't read history: {e}"))?;
+    let Some(entry) = entries.into_iter().next() else {
+        println!("nothing to undo. Dictate something first.");
+        return Ok(());
+    };
+    let text = entry
+        .cleaned_text
+        .as_deref()
+        .filter(|t| !t.trim().is_empty())
+        .unwrap_or(&entry.raw_text);
+    if text.trim().is_empty() {
+        println!("nothing to undo. Dictate something first.");
+        return Ok(());
+    }
+    // Persistent exactly-once gate: a replayed undo (restart, double
+    // hotkey on a scratch phrase) must not delete twice.
+    let ticket = susurro_core::Ticket::new(susurro_core::SessionId::generate(), "remove");
+    match susurro_storage::SqliteTickets::open(&db_path()) {
+        Ok(store) => {
+            if !store
+                .claim(&ticket)
+                .map_err(|e| anyhow::anyhow!("Couldn't claim ticket: {e}"))?
+            {
+                anyhow::bail!("Duplicate undo blocked by persistent ticket.");
+            }
+        }
+        Err(e) => eprintln!("ticket store degraded (continuing in-memory): {e}"),
+    }
+    inject.remove_last(text, &ticket).map_err(|e| match e {
+        susurro_core::CoreError::Injection(msg) => {
+            anyhow::anyhow!("Couldn't remove text. Is ydotoold running? {msg}")
+        }
+        other => anyhow::anyhow!("{other}"),
+    })?;
+    history
+        .remove(entry.session)
+        .map_err(|e| anyhow::anyhow!("Couldn't consume history entry: {e}"))?;
+    println!(
+        "removed last injection ({} chars). Repeat to walk back.",
+        text.chars().count()
+    );
+    Ok(())
+}
+
+/// Platform injector for undo: real injector on Linux and Windows.
+/// Elsewhere there is no span to select.
+fn undo_injector() -> anyhow::Result<Box<dyn susurro_core::ports::TextInjectionPort>> {
+    #[cfg(target_os = "linux")]
+    return Ok(Box::new(susurro_adapters_linux::LinuxPasteInjector::new()));
+    #[cfg(target_os = "windows")]
+    return Ok(Box::new(susurro_adapters_windows::WindowsSendInput));
+    #[cfg(not(any(target_os = "linux", target_os = "windows")))]
+    anyhow::bail!("Undo needs Linux or Windows injection.");
+}
+
+fn undo() -> anyhow::Result<()> {
+    undo_last_session(undo_injector()?.as_ref())
 }
 
 fn show_history(limit: usize) -> anyhow::Result<()> {
@@ -1904,6 +2008,17 @@ mod tests {
         let out = resolve_model_with(&None, None, None, Some(&h));
         assert!(out.ends_with("base.en.bin"), "{out}");
         let _ = std::fs::remove_dir_all(&home);
+    }
+
+    #[test]
+    fn scratch_that_matches_command_not_dictation() {
+        assert!(is_scratch_that("scratch that"));
+        assert!(is_scratch_that("  Scratch That. "));
+        assert!(is_scratch_that("SCRATCH THAT!"));
+        assert!(!is_scratch_that("scratch that please"));
+        assert!(!is_scratch_that("please scratch that"));
+        assert!(!is_scratch_that("scratch that itch"));
+        assert!(!is_scratch_that(""));
     }
 
     #[cfg(target_os = "linux")]

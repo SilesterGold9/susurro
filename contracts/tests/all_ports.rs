@@ -132,6 +132,9 @@ fn all_injectors_accept_empty() {
     c::check_inject_empty_ok(&susurro_adapters_linux::MockInjector::new());
     c::check_inject_empty_ok(&susurro_adapters_linux::LinuxPasteInjector::new());
     c::check_inject_empty_ok(&susurro_adapters_windows::WindowsSendInput);
+    c::check_remove_last_empty_ok(&susurro_adapters_linux::MockInjector::new());
+    c::check_remove_last_empty_ok(&susurro_adapters_linux::LinuxPasteInjector::new());
+    c::check_remove_last_empty_ok(&susurro_adapters_windows::WindowsSendInput);
 }
 
 // --- settings plus history ---

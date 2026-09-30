@@ -43,6 +43,10 @@ impl HistoryStorePort for MemoryHistory {
         }
         Ok(())
     }
+    fn remove(&mut self, session: susurro_core::SessionId) -> Result<(), CoreError> {
+        self.entries.retain(|e| e.session != session);
+        Ok(())
+    }
 }
 
 fn open_db(path: &std::path::Path) -> Result<rusqlite::Connection, CoreError> {
@@ -158,6 +162,17 @@ impl HistoryStorePort for SqliteHistory {
                     entry.latency_ms as i64,
                     now,
                 ],
+            )
+            .map_err(|e| CoreError::Storage(e.to_string()))?;
+        Ok(())
+    }
+    fn remove(&mut self, session: susurro_core::SessionId) -> Result<(), CoreError> {
+        self.conn
+            .lock()
+            .map_err(|e| CoreError::Storage(format!("db lock poisoned: {e}")))?
+            .execute(
+                "DELETE FROM history WHERE session = ?1",
+                rusqlite::params![format!("{:032x}", session.0)],
             )
             .map_err(|e| CoreError::Storage(e.to_string()))?;
         Ok(())
@@ -567,6 +582,12 @@ mod tests {
         let recent = h.recent(10).unwrap();
         assert_eq!(recent.len(), 2);
         assert!(recent.iter().any(|e| e.raw_text == "hello again"));
+        // Undo consumes the entry so a repeat undo walks back.
+        h.remove(susurro_core::SessionId::new(1)).unwrap();
+        let recent = h.recent(10).unwrap();
+        assert_eq!(recent.len(), 1);
+        assert_eq!(recent[0].raw_text, "other");
+        h.remove(susurro_core::SessionId::new(999)).unwrap();
         let _ = std::fs::remove_file(&p);
     }
 

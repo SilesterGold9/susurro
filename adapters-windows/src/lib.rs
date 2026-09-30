@@ -120,6 +120,18 @@ pub fn input_count_for(units: &[u16]) -> usize {
     units.len() * 2
 }
 
+/// Virtual-key codes for the removal chord: shift, left, backspace.
+pub const VK_SHIFT: u16 = 0x10;
+pub const VK_LEFT: u16 = 0x25;
+pub const VK_BACK: u16 = 0x08;
+
+/// INPUT count for removing `text`: shift down/up around one
+/// left down/up per char, then backspace down/up. Pure so both CI
+/// runners prove the sizing; only Windows sends it.
+pub fn removal_input_count(text: &str) -> usize {
+    text.chars().count() * 2 + 4
+}
+
 /// Direct Unicode injector via `SendInput`. Types the text into the
 /// focused window without touching the clipboard. Empty text injects
 /// nothing and skips the FFI entirely.
@@ -189,6 +201,62 @@ impl TextInjectionPort for WindowsSendInput {
             }
         }
     }
+    fn remove_last(&self, text: &str, _ticket: &Ticket) -> Result<(), CoreError> {
+        if text.is_empty() {
+            return Ok(());
+        }
+        #[cfg(not(target_os = "windows"))]
+        {
+            Err(CoreError::Injection(
+                "SendInput removal needs Windows. Expected on Linux CI.".into(),
+            ))
+        }
+        #[cfg(target_os = "windows")]
+        {
+            // SAFETY: same contract as inject: built array, checked
+            // length, pointer valid for the call only.
+            unsafe {
+                use windows_sys::Win32::UI::Input::KeyboardAndMouse::*;
+                fn key(vk: u16, up: bool) -> INPUT {
+                    INPUT {
+                        r#type: INPUT_KEYBOARD,
+                        Anonymous: INPUT_0 {
+                            ki: KEYBDINPUT {
+                                wVk: vk,
+                                wScan: 0,
+                                dwFlags: if up { KEYEVENTF_KEYUP } else { 0 },
+                                time: 0,
+                                dwExtraInfo: 0,
+                            },
+                        },
+                    }
+                }
+                let mut inputs: Vec<INPUT> = Vec::with_capacity(removal_input_count(text));
+                inputs.push(key(VK_SHIFT, false));
+                for _ in text.chars() {
+                    inputs.push(key(VK_LEFT, false));
+                    inputs.push(key(VK_LEFT, true));
+                }
+                inputs.push(key(VK_SHIFT, true));
+                inputs.push(key(VK_BACK, false));
+                inputs.push(key(VK_BACK, true));
+                let sent = SendInput(
+                    inputs.len() as u32,
+                    inputs.as_ptr(),
+                    std::mem::size_of::<INPUT>() as i32,
+                );
+                if sent as usize != inputs.len() {
+                    return Err(CoreError::Injection(format!(
+                        "SendInput removed {} of {} inputs: {}",
+                        sent,
+                        inputs.len(),
+                        windows_sys::Win32::Foundation::GetLastError()
+                    )));
+                }
+                Ok(())
+            }
+        }
+    }
 }
 
 #[cfg(test)]
@@ -224,11 +292,21 @@ mod tests {
         let ticket = Ticket::new(susurro_core::SessionId::new(1), "inject");
         // Empty text never reaches the FFI on any platform.
         assert!(WindowsSendInput.inject("", &ticket).is_ok());
+        assert!(WindowsSendInput.remove_last("", &ticket).is_ok());
         #[cfg(not(target_os = "windows"))]
         {
             assert!(WindowsHotkey::with_defaults().wait_for_hotkey().is_err());
             assert!(WindowsSendInput.inject("hi", &ticket).is_err());
+            assert!(WindowsSendInput.remove_last("hi", &ticket).is_err());
         }
+    }
+
+    #[test]
+    fn removal_sizing_covers_chord() {
+        // "hi": shift down/up, two left down/up, backspace down/up.
+        assert_eq!(removal_input_count("hi"), 2 * 2 + 4);
+        assert_eq!(removal_input_count(""), 4);
+        assert_eq!(removal_input_count("a𝄞"), 2 * 2 + 4);
     }
 
     /// Real registration roundtrip, Windows CI only: proves the flags

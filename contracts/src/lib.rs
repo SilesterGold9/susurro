@@ -136,6 +136,15 @@ pub fn check_inject_empty_ok(injector: &dyn TextInjectionPort) {
     injector.inject("", &ticket).expect("empty inject failed");
 }
 
+/// Empty removal is a no-op on every platform, same contract as
+/// empty injection. Real spans need the platform injector.
+pub fn check_remove_last_empty_ok(injector: &dyn TextInjectionPort) {
+    let ticket = Ticket::new(susurro_core::SessionId::new(2), "remove");
+    injector
+        .remove_last("", &ticket)
+        .expect("empty remove failed");
+}
+
 /// Settings converge: set, overwrite, missing reads None.
 pub fn check_settings_roundtrip(store: &mut dyn SettingsStorePort) {
     assert_eq!(store.get("contract-key").unwrap(), None);
