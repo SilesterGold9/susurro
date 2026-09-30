@@ -280,7 +280,9 @@ struct ListenOpts {
 
 fn resolve_model(explicit: &Option<String>) -> String {
     let env = std::env::var("SUSURRO_MODEL").ok();
-    let home = std::env::var("HOME").ok();
+    let home = std::env::var("HOME")
+        .or_else(|_| std::env::var("USERPROFILE"))
+        .ok();
     resolve_model_with(explicit, env.as_deref(), stored_tier(), home.as_deref())
 }
 
@@ -575,7 +577,13 @@ fn doctor() -> anyhow::Result<()> {
 }
 
 fn which(bin: &str) -> bool {
-    std::process::Command::new("which")
+    // `where` is the Windows equivalent; failure means missing,
+    // never an error, so doctor degrades to install hints.
+    #[cfg(target_os = "windows")]
+    let probe = "where";
+    #[cfg(not(target_os = "windows"))]
+    let probe = "which";
+    std::process::Command::new(probe)
         .arg(bin)
         .output()
         .map(|o| o.status.success())
@@ -585,6 +593,10 @@ fn which(bin: &str) -> bool {
 fn shellexpand(p: &str) -> String {
     if let Some(rest) = p.strip_prefix("~/") {
         if let Ok(home) = std::env::var("HOME") {
+            return format!("{home}/{rest}");
+        }
+        // Windows home: USERPROFILE when HOME is unset.
+        if let Ok(home) = std::env::var("USERPROFILE") {
             return format!("{home}/{rest}");
         }
     }
@@ -668,8 +680,10 @@ impl susurro_core::ports::TextInjectionPort for StdoutInjector {
 /// Owned live-partial decoder for the record loop (v0.4.0, issue 23).
 /// Mock replays a growing word prefix; real decodes a trailing window.
 /// Both speak through the port so the loop never names a backend.
+/// The windowed variant exists on Linux only, matching its caller.
 enum LiveDecoder {
     Mock(MockSttOnce),
+    #[cfg(target_os = "linux")]
     Windowed(susurro_adapters_stt_local::WindowedPartial),
 }
 
@@ -677,6 +691,7 @@ impl LiveDecoder {
     fn as_stt(&self) -> &dyn SpeechToTextPort {
         match self {
             Self::Mock(m) => m,
+            #[cfg(target_os = "linux")]
             Self::Windowed(w) => w,
         }
     }
@@ -1073,10 +1088,21 @@ fn run_utterance(opts: &ListenOpts, tickets: &TicketRegistry) -> anyhow::Result<
 
 fn db_path() -> std::path::PathBuf {
     if let Ok(home) = std::env::var("HOME") {
-        std::path::PathBuf::from(home).join(".local/share/susurro/susurro.db")
-    } else {
-        std::path::PathBuf::from("/tmp/susurro.db")
+        return std::path::PathBuf::from(home).join(".local/share/susurro/susurro.db");
     }
+    // Windows first-run: LOCALAPPDATA, then the profile root.
+    // temp_dir last so a missing home degrades instead of failing.
+    #[cfg(target_os = "windows")]
+    if let Ok(local) = std::env::var("LOCALAPPDATA") {
+        return std::path::PathBuf::from(local)
+            .join("susurro")
+            .join("susurro.db");
+    }
+    #[cfg(target_os = "windows")]
+    if let Ok(profile) = std::env::var("USERPROFILE") {
+        return std::path::PathBuf::from(profile).join(".local/share/susurro/susurro.db");
+    }
+    std::env::temp_dir().join("susurro.db")
 }
 
 fn show_history(limit: usize) -> anyhow::Result<()> {

@@ -81,6 +81,8 @@ impl Default for LinuxPasteInjector {
 
 /// wtype invocation for `text`: `--` ends option parsing so leading
 /// dashes type literally, and argv carries the text with no shell.
+/// Linux-only helper: the whole wtype path is compiled out elsewhere.
+#[cfg(target_os = "linux")]
 fn wtype_command(text: &str) -> std::process::Command {
     let mut cmd = std::process::Command::new("wtype");
     cmd.arg("--").arg(text);
@@ -90,12 +92,14 @@ fn wtype_command(text: &str) -> std::process::Command {
 /// Outcome of the wtype attempt: typed, missing (fall back to the
 /// clipboard path), or failed at runtime (error out, never double-paste
 /// by falling back after a tool already ran).
+#[cfg(target_os = "linux")]
 enum WtypeOutcome {
     Typed,
     Missing,
     Failed(String),
 }
 
+#[cfg(target_os = "linux")]
 fn try_wtype(text: &str) -> WtypeOutcome {
     match wtype_command(text).status() {
         Err(_) => WtypeOutcome::Missing,
@@ -256,6 +260,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg(target_os = "linux")]
     fn wtype_command_types_text_without_shell() {
         let dbg = format!("{:?}", super::wtype_command("hello -- world"));
         assert!(dbg.contains("wtype"), "{dbg}");
