@@ -30,7 +30,7 @@ impl Default for Settings {
     fn default() -> Self {
         Self {
             seconds: 30,
-            auto_stop: true,
+            auto_stop: false,
             sound: true,
             cleanup: "ollama".into(),
             ollama_model: "qwen3:0.6b".into(),

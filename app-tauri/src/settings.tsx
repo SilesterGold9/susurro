@@ -16,7 +16,7 @@ export interface Settings {
 
 const DEFAULTS: Settings = {
   seconds: 30,
-  auto_stop: true,
+  auto_stop: false,
   sound: true,
   cleanup: "ollama",
   ollama_model: "qwen3:0.6b",

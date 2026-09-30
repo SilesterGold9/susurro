@@ -115,16 +115,41 @@ html { background: transparent; }
   min-width: 0;
   mask-image: linear-gradient(to right, transparent, black 12%, black 88%, transparent);
 }
-/* Dictation timer. Monospace per the system, fixed width so counting
-   never reflows the row. Starts on listening, holds the total after. */
+/* Dictation timer. Monospace per the system. Each digit is a 1em
+   odometer window over a 0-9 strip; columns translate with a fast
+   spring-like ease, edges fade through a baked mask so motion enters
+   and leaves instead of clipping. */
 .timer {
   font-family: var(--mono);
   font-size: 12px;
   font-variant-numeric: tabular-nums;
   opacity: 0.75;
-  min-width: 40px;
   flex: none;
+  display: inline-flex;
   text-align: right;
+}
+.rdigit {
+  display: inline-block;
+  height: 1em;
+  line-height: 1;
+  overflow: hidden;
+  mask-image: linear-gradient(to bottom, transparent, black 25%, black 75%, transparent);
+}
+.rdigit-static {
+  display: inline-block;
+  height: 1em;
+  line-height: 1;
+}
+.rdigit-col {
+  display: flex;
+  flex-direction: column;
+  transition: transform 0.45s cubic-bezier(0.34, 1.25, 0.4, 1);
+  will-change: transform;
+}
+.rdigit-glyph {
+  display: block;
+  height: 1em;
+  line-height: 1;
 }
 /* Settle moment: 200ms inside the 150-250ms plan window, scale only,
    plus a muted teal check. */
@@ -138,27 +163,40 @@ html { background: transparent; }
   flex: none;
   opacity: 0.9;
 }
-.status {
+/* Transient state flash: words appear centered over the wave on
+   change and leave, so the resting row never reflows. Enter fades
+   up 8px in 300ms; removal is instant by design, the row simply
+   returns to clean. Persistent while error or first-run hint. */
+.pill { position: relative; }
+.flash {
+  position: absolute;
+  left: 50px;
+  right: 110px;
+  top: 50%;
+  transform: translateY(-50%);
+  text-align: center;
   font-size: 12px;
-  opacity: 0.75;
-  width: 64px;
-  flex: none;
-  text-align: right;
+  opacity: 0.85;
+  pointer-events: none;
+  white-space: nowrap;
   overflow: hidden;
   text-overflow: ellipsis;
-  white-space: nowrap;
+  animation: flash-in 300ms cubic-bezier(0, 0, 0.58, 1);
 }
-.status.is-error {
-  color: var(--coral);
-  font-size: 11px;
-  opacity: 1;
+.flash.is-error { color: var(--coral); opacity: 1; }
+@keyframes flash-in {
+  from { opacity: 0; transform: translateY(calc(-50% + 8px)); }
+  to { opacity: 0.85; transform: translateY(-50%); }
 }
 /* Static fallback: no motion anywhere. Canvas shimmer and breathing
-   are already gated in JS; this parks the CSS animations. */
+   are already gated in JS; this parks the CSS animations. Rolling
+   digits jump straight to the target; the flash appears instantly. */
 @media (prefers-reduced-motion: reduce) {
   .state-listening .avatar,
   .state-processing .avatar,
   .settle { animation: none; }
+  .rdigit-col { transition: none; }
+  .flash { animation: none; }
 }
 
 /* Settings window */

@@ -1,5 +1,6 @@
-import { useEffect, useRef, useState } from "react";
+import { useEffect, useLayoutEffect, useRef, useState } from "react";
 import { listen } from "@tauri-apps/api/event";
+import { getCurrentWindow } from "@tauri-apps/api/window";
 import { Blobatar } from "@blobatar/react";
 import { idle, thinking } from "blobatar/expression";
 
@@ -29,6 +30,69 @@ function formatElapsed(ms: number): string {
   const mm = String(Math.floor(s / 60)).padStart(2, "0");
   const ss = String(s % 60).padStart(2, "0");
   return `${mm}:${ss}`;
+}
+
+// Odometer digit: a 0-9 strip three cycles tall, translated so the
+// target glyph lands in the 1em window. Position only ever moves
+// forward, so 9 to 0 rolls through the seam instead of rewinding;
+// a synchronous snap folds it back mid-strip, invisible because
+// glyph N renders identically to glyph N plus or minus 10. Static
+// characters (the colon) render as plain text, never in a strip.
+const GLYPHS = "012345678901234567890123456789";
+
+function RollDigit({ value }: { value: string }) {
+  const n = value >= "0" && value <= "9" ? value.charCodeAt(0) - 48 : -1;
+  const pos = useRef(10);
+  const colRef = useRef<HTMLSpanElement>(null);
+  const blurTimer = useRef<number>(0);
+  useLayoutEffect(() => {
+    if (n < 0) return;
+    const el = colRef.current;
+    if (!el) return;
+    const cur = ((pos.current % 10) + 10) % 10;
+    if (cur === n) return;
+    const next = pos.current + ((n - cur + 10) % 10);
+    if (next >= 25) {
+      pos.current -= 10;
+      el.style.transition = "none";
+      el.style.transform = `translateY(${-pos.current}em)`;
+      void el.offsetWidth;
+      el.style.transition = "";
+      pos.current = next - 10;
+    } else {
+      pos.current = next;
+    }
+    el.style.transform = `translateY(${-pos.current}em)`;
+    el.style.filter = "blur(1px)";
+    window.clearTimeout(blurTimer.current);
+    blurTimer.current = window.setTimeout(() => {
+      if (colRef.current) colRef.current.style.filter = "";
+    }, 450);
+    return () => window.clearTimeout(blurTimer.current);
+  }, [value]);
+  if (n < 0) return <span className="rdigit-static">{value}</span>;
+  return (
+    <span className="rdigit">
+      <span ref={colRef} className="rdigit-col" style={{ transform: `translateY(${-pos.current}em)` }}>
+        {GLYPHS.split("").map((g, i) => (
+          <span key={i} className="rdigit-glyph">
+            {g}
+          </span>
+        ))}
+      </span>
+    </span>
+  );
+}
+
+function RollTimer({ elapsed }: { elapsed: number }) {
+  const text = formatElapsed(elapsed);
+  return (
+    <span className="timer" aria-hidden="true">
+      {text.split("").map((ch, i) => (
+        <RollDigit key={i} value={ch} />
+      ))}
+    </span>
+  );
 }
 
 type CtxWithRoundRect = CanvasRenderingContext2D & {
@@ -123,6 +187,37 @@ export default function Pill() {
   useEffect(() => {
     if (state === "listening") setErrorMsg("");
   }, [state]);
+
+  // Transient state flash: the resting row is avatar, wave, and
+  // timer only. Words appear centered over the wave on change, fade
+  // in, and leave after 1.6s. Errors and the first-run hint stick
+  // until the next run because they carry instructions.
+  type Flash = { text: string; key: number; sticky: boolean };
+  const [flash, setFlash] = useState<Flash | null>(null);
+  useEffect(() => {
+    if (state === "listening" || state === "processing") {
+      setFlash(null);
+      return;
+    }
+    if (state === "done") {
+      setFlash({ text: "pasted", key: Date.now(), sticky: false });
+      return;
+    }
+    if (state === "error") {
+      setFlash({ text: (errorMsg || "couldn't paste").slice(0, 64), key: Date.now(), sticky: true });
+      return;
+    }
+    if (!lastText) {
+      setFlash({ text: "press super shift d", key: 0, sticky: true });
+    } else {
+      setFlash(null);
+    }
+  }, [state, errorMsg, lastText]);
+  useEffect(() => {
+    if (!flash || flash.sticky) return;
+    const id = window.setTimeout(() => setFlash((f) => (f && f.key === flash.key ? null : f)), 1600);
+    return () => window.clearTimeout(id);
+  }, [flash]);
 
   // Dictation timer: runs from listening through processing, holds
   // the total on done and error, resets on a new run. Tick is coarse
@@ -270,26 +365,27 @@ export default function Pill() {
     draw(0, true);
   }
 
-  const label =
-    state === "idle"
-      ? lastText
-        ? "ready"
-        : "press super shift d"
-      : state === "listening" || state === "processing"
-        ? (contextApp ?? "listening")
-        : state === "done"
-          ? "pasted"
-          : (errorMsg || "couldn't paste").slice(0, 64);
-
-  // The row stays visually stable across the active session: the
-  // label names the target app from listening through processing, so
-  // the listening/working swap that churned the row is gone. State
-  // rides the avatar ring plus the timer; words only confirm.
+  // The resting row is avatar, wave, and timer only. State words
+  // appear as a transient flash over the wave and leave; nothing
+  // reflows between states.
   const avatarName = contextApp ?? "susurro";
+
+  // Whole pill is a drag handle: no buttons live here, and press
+  // never starts dictation, so mousedown always means move. The move
+  // itself is compositor-mediated: it works where the compositor
+  // honors client-initiated moves of floating windows, and silently
+  // does nothing elsewhere. Default dock is unchanged.
+  function onDragStart() {
+    void getCurrentWindow().startDragging().catch(() => {});
+  }
 
   return (
     <div className="pill-wrap">
-      <div className={`pill state-${state}${state === "done" ? " settle" : ""}`} key={settleKey}>
+      <div
+        className={`pill state-${state}${state === "done" ? " settle" : ""}`}
+        key={settleKey}
+        onMouseDown={onDragStart}
+      >
         <span
           className="avatar"
           title={contextApp ? `dictating into ${contextApp}` : "dictation target unknown"}
@@ -321,12 +417,16 @@ export default function Pill() {
             />
           </svg>
         )}
-        <span className="timer" aria-hidden="true">
-          {formatElapsed(elapsed)}
-        </span>
-        <span className={`status${state === "error" ? " is-error" : ""}`} role="status">
-          {label}
-        </span>
+        <RollTimer elapsed={elapsed} />
+        {flash && (
+          <span
+            key={flash.key}
+            className={`flash${state === "error" ? " is-error" : ""}`}
+            role="status"
+          >
+            {flash.text}
+          </span>
+        )}
       </div>
     </div>
   );
