@@ -233,8 +233,9 @@ mod tests {
 
     /// Real registration roundtrip, Windows CI only: proves the flags
     /// and id reach Win32 and come back. No message loop, never blocks.
-    /// The error code rides in the message so a headless-runner failure
-    /// names itself instead of asserting bare zeros.
+    /// The default bind can be held by the host (1409 on CI runners);
+    /// then an obscure fallback combo still proves the mechanics, and
+    /// the code lands in the message either way.
     #[test]
     #[cfg(target_os = "windows")]
     fn hotkey_registers_and_releases() {
@@ -243,19 +244,22 @@ mod tests {
             use windows_sys::Win32::UI::Input::KeyboardAndMouse::{
                 RegisterHotKey, UnregisterHotKey,
             };
-            let registered = RegisterHotKey(
-                std::ptr::null_mut(),
-                HOTKEY_ID,
-                DEFAULT_MODIFIERS_WIN,
-                DEFAULT_VK_R,
-            );
-            assert_ne!(
-                registered,
-                0,
-                "RegisterHotKey failed, GetLastError={}",
-                GetLastError()
-            );
-            assert_ne!(UnregisterHotKey(std::ptr::null_mut(), HOTKEY_ID), 0);
+            // Win+Shift+R, else Ctrl+Alt+F24.
+            let combos = [
+                (HOTKEY_ID, DEFAULT_MODIFIERS_WIN, DEFAULT_VK_R),
+                (HOTKEY_ID + 1, 0x0002 | 0x0001, 0x87),
+            ];
+            let mut registered = None;
+            for (id, mods, vk) in combos {
+                if RegisterHotKey(std::ptr::null_mut(), id, mods, vk) != 0 {
+                    registered = Some(id);
+                    break;
+                }
+            }
+            let id = registered.unwrap_or_else(|| {
+                panic!("RegisterHotKey failed, GetLastError={}", GetLastError())
+            });
+            assert_ne!(UnregisterHotKey(std::ptr::null_mut(), id), 0);
         }
     }
 }
