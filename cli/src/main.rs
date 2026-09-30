@@ -681,12 +681,14 @@ impl susurro_core::ports::TextInjectionPort for StdoutInjector {
 /// Mock replays a growing word prefix; real decodes a trailing window.
 /// Both speak through the port so the loop never names a backend.
 /// The windowed variant exists on Linux only, matching its caller.
+#[cfg(target_os = "linux")]
 enum LiveDecoder {
     Mock(MockSttOnce),
     #[cfg(target_os = "linux")]
     Windowed(susurro_adapters_stt_local::WindowedPartial),
 }
 
+#[cfg(target_os = "linux")]
 impl LiveDecoder {
     fn as_stt(&self) -> &dyn SpeechToTextPort {
         match self {
@@ -1453,14 +1455,14 @@ fn started_buffer(pcm: Vec<i16>) -> anyhow::Result<susurro_adapters_audio::MockC
     Ok(buffered)
 }
 
-fn daemon(socket_path: &str, opts: &ListenOpts) -> anyhow::Result<()> {
+fn daemon(_socket_path: &str, opts: &ListenOpts) -> anyhow::Result<()> {
     use susurro_core::ports::GlobalHotkeyPort;
     // Hotkey source is platform-owned: Hyprland socket on Linux,
     // RegisterHotKey on Windows. Anything else has no daemon.
     #[cfg(target_os = "linux")]
     let hotkey: Box<dyn GlobalHotkeyPort> = {
-        let socket = susurro_adapters_linux::HyprlandSocket::new(socket_path);
-        println!("susurro daemon listening on {socket_path}");
+        let socket = susurro_adapters_linux::HyprlandSocket::new(_socket_path);
+        println!("susurro daemon listening on {_socket_path}");
         println!("Hyprland bind: {}", socket.bind_snippet());
         Box::new(socket)
     };
