@@ -2173,6 +2173,20 @@ dependencies = [
 ]
 
 [[package]]
+name = "susurro-contracts"
+version = "0.6.0"
+dependencies = [
+ "susurro-adapters-audio",
+ "susurro-adapters-cleanup",
+ "susurro-adapters-linux",
+ "susurro-adapters-stt-cloud",
+ "susurro-adapters-stt-local",
+ "susurro-adapters-windows",
+ "susurro-core",
+ "susurro-storage",
+]
+
+[[package]]
 name = "susurro-core"
 version = "0.6.0"
 dependencies = [
