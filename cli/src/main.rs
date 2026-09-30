@@ -318,9 +318,12 @@ fn resolve_model_with(
             return p.to_string_lossy().into_owned();
         }
     }
-    // First model actually on disk wins; the error names base.en.
+    // First model actually on disk wins. Base first: it is the safe
+    // default the error names, and a stored bench tier overrides this
+    // order whenever the bench has run. Small wins only via the tier
+    // or an explicit flag, never by accident on weak hardware.
     if let Some(h) = home {
-        for name in ["small.en.bin", "tiny.en.bin", "base.en.bin"] {
+        for name in ["base.en.bin", "tiny.en.bin", "small.en.bin"] {
             let p = std::path::PathBuf::from(h)
                 .join(".local/share/susurro/models")
                 .join(name);
@@ -1590,6 +1593,17 @@ mod tests {
             Some(&h),
         );
         assert_eq!(out, "/tmp/custom.bin");
+        let _ = std::fs::remove_dir_all(&home);
+    }
+
+    #[test]
+    fn bare_scan_prefers_base_over_small() {
+        // No overrides anywhere: the safe default wins even when a
+        // bigger model sits on disk. Small wins via tier or explicit.
+        let home = home_with(&["small.en.bin", "tiny.en.bin", "base.en.bin"]);
+        let h = home.to_string_lossy().into_owned();
+        let out = resolve_model_with(&None, None, None, Some(&h));
+        assert!(out.ends_with("base.en.bin"), "{out}");
         let _ = std::fs::remove_dir_all(&home);
     }
 }

@@ -142,14 +142,21 @@ pub fn igpu_nodes(dir: &std::path::Path) -> Vec<String> {
     nodes
 }
 
+/// True when `ldconfig -p` text names any of the given libraries
+/// (case-insensitive). Shared with the ONNX detector so the shape
+/// lives in one place.
+pub fn ldconfig_has(ldconfig: &str, names: &[&str]) -> bool {
+    ldconfig.lines().any(|l| {
+        let low = l.to_lowercase();
+        names.iter().any(|n| low.contains(n))
+    })
+}
+
 /// True when the runtime is visible: an `ldconfig -p` line naming
 /// it, or a well-known install path on disk. Both inputs are
 /// parameters so tests never touch the real system.
 pub fn runtime_present_in(ldconfig: &str, extra_paths: &[&std::path::Path]) -> bool {
-    if ldconfig.lines().any(|l| {
-        let low = l.to_lowercase();
-        low.contains("libopenvino") || low.contains("libinference_engine")
-    }) {
+    if ldconfig_has(ldconfig, &["libopenvino", "libinference_engine"]) {
         return true;
     }
     extra_paths.iter().any(|p| p.exists())

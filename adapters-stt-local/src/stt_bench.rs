@@ -42,10 +42,8 @@ pub fn detect_onnx() -> CandidateStatus {
         .arg("-p")
         .output()
         .map(|o| String::from_utf8_lossy(&o.stdout).into_owned())
-        .unwrap_or_default()
-        .lines()
-        .any(|l| l.to_lowercase().contains("libonnxruntime"));
-    if !runtime {
+        .unwrap_or_default();
+    if !super::openvino::ldconfig_has(&runtime, &["libonnxruntime"]) {
         return CandidateStatus::Unavailable("no libonnxruntime found".into());
     }
     match std::env::var("SUSURRO_ONNX_ENCODER") {
