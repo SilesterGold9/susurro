@@ -28,6 +28,18 @@ cargo run -p susurro-cli -- hyprland-bind
 
 Set `SUSURRO_MODEL` to your `base.en` model path. Install `wl-clipboard`, `ydotool` (+ `ydotoold` running), `whisper-cli`, `socat` for the real loop.
 
+## Task runner (`just`)
+
+```sh
+just dev            # mock listen loop, hardware-free
+just bench          # CPU tier benchmark
+just test-contract  # cargo test --workspace (includes contracts/)
+just lint           # fmt check + clippy -D warnings (same as CI)
+just doctor         # susurro doctor
+```
+
+Recipes are thin wrappers over the cargo commands above. Install with `cargo install just`.
+
 ## Install (v0.1.0+)
 
 Prebuilt bundles on the [releases page](https://github.com/SilesterGold9/susurro/releases):
