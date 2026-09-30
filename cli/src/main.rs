@@ -154,6 +154,13 @@ enum Cmd {
     /// and persist the winner. Auto backend honors the stored
     /// winner while it stays available.
     SttBench,
+    /// Replay a dictation session event by event for debugging.
+    /// No id prints recent sessions with event counts.
+    Replay {
+        /// Session id or unique prefix. Empty lists sessions.
+        #[arg(default_value = "")]
+        session: String,
+    },
 }
 
 fn main() -> anyhow::Result<()> {
@@ -259,6 +266,7 @@ fn main() -> anyhow::Result<()> {
         Cmd::PrivacyList => privacy_list(),
         Cmd::Bench => bench(),
         Cmd::SttBench => stt_bench(),
+        Cmd::Replay { session } => replay(&session),
     }
 }
 
@@ -1016,6 +1024,11 @@ fn run_utterance(opts: &ListenOpts, tickets: &TicketRegistry) -> anyhow::Result<
         ensure_bench_tier(&opts.model);
     }
     let model_path = resolve_model(&opts.model);
+    log_event(
+        session,
+        susurro_core::EventKind::Started,
+        &format!("model {model_path}"),
+    );
     let dict_prompt = susurro_storage::SqliteDictionary::open(&db_path)
         .map(|d| d.prompt().unwrap_or_default())
         .unwrap_or_default();
@@ -1253,18 +1266,20 @@ fn run_utterance(opts: &ListenOpts, tickets: &TicketRegistry) -> anyhow::Result<
         tickets,
         session,
         &|stage| {
-            eprintln!(
-                "stage: {}",
-                match stage {
-                    susurro_core::Stage::Transcribing => "transcribing",
-                    susurro_core::Stage::Polishing => "polishing",
-                    susurro_core::Stage::Injecting => "injecting",
-                }
-            )
+            let name = match stage {
+                susurro_core::Stage::Transcribing => "transcribing",
+                susurro_core::Stage::Polishing => "polishing",
+                susurro_core::Stage::Injecting => "injecting",
+            };
+            eprintln!("stage: {name}");
+            log_event(session, susurro_core::EventKind::Stage, name);
         },
     )
     .map_err(|e| {
         cues.play(susurro_adapters_audio::Cue::Error);
+        let msg = format!("{e}");
+        let short: String = msg.chars().take(200).collect();
+        log_event(session, susurro_core::EventKind::Error, &short);
         match e {
             susurro_core::CoreError::Capture(msg) => {
                 anyhow::anyhow!("Couldn't capture audio. Check mic permissions: {msg}")
@@ -1286,16 +1301,22 @@ fn run_utterance(opts: &ListenOpts, tickets: &TicketRegistry) -> anyhow::Result<
     // History (#14): idempotent upsert, best-effort so a broken db
     // never blocks dictation. Chain reports the winning provider (#19).
     let latency_ms = t0.elapsed().as_millis() as u64;
+    let provider = if opts.mock {
+        "mock".to_string()
+    } else if let Some(c) = chain_ref {
+        c.last_provider()
+    } else {
+        "local".to_string()
+    };
+    log_event(session, susurro_core::EventKind::Provider, &provider);
+    log_event(
+        session,
+        susurro_core::EventKind::Done,
+        &format!("{latency_ms}ms"),
+    );
     match susurro_storage::SqliteHistory::open(&db_path) {
         Ok(mut h) => {
             use susurro_core::ports::HistoryStorePort;
-            let provider = if opts.mock {
-                "mock".to_string()
-            } else if let Some(c) = chain_ref {
-                c.last_provider()
-            } else {
-                "local".to_string()
-            };
             if let Err(e) = h.upsert(susurro_core::ports::HistoryEntry {
                 session,
                 raw_text: out.raw_text.clone(),
@@ -1328,6 +1349,61 @@ fn db_path() -> std::path::PathBuf {
         return std::path::PathBuf::from(profile).join(".local/share/susurro/susurro.db");
     }
     std::env::temp_dir().join("susurro.db")
+}
+
+/// Record one session event, best-effort. A broken log prints
+/// degraded and dictation continues; debugging must never block it.
+fn log_event(session: susurro_core::SessionId, kind: susurro_core::EventKind, detail: &str) {
+    match susurro_storage::SqliteEvents::open(&db_path()) {
+        Ok(log) => {
+            if let Err(e) = log.record(session, kind, detail) {
+                eprintln!("event log degraded: {e}");
+            }
+        }
+        Err(e) => eprintln!("event log degraded: {e}"),
+    }
+}
+
+/// Replay one session or list recent ones (v0.7.0, issue 36).
+/// Times print relative to the first event so the shape of the
+/// session reads at a glance.
+fn replay(session: &str) -> anyhow::Result<()> {
+    let log = susurro_storage::SqliteEvents::open(&db_path())
+        .map_err(|e| anyhow::anyhow!("Couldn't open event log: {e}"))?;
+    if session.trim().is_empty() {
+        let recent = log
+            .recent_sessions(10)
+            .map_err(|e| anyhow::anyhow!("Couldn't list sessions: {e}"))?;
+        if recent.is_empty() {
+            println!("no sessions logged yet. Dictate something first.");
+            return Ok(());
+        }
+        println!("recent sessions (replay <id-prefix>):");
+        for (id, count, _) in recent {
+            println!("- {} ({} events)", &id[..8.min(id.len())], count);
+        }
+        return Ok(());
+    }
+    let events = log
+        .replay(session)
+        .map_err(|e| anyhow::anyhow!("Couldn't replay session: {e}"))?;
+    let first = events.first();
+    match first {
+        None => println!("session has no events."),
+        Some(head) => {
+            let t0 = head.at_ms;
+            println!("session {} ({} events):", head.session, events.len());
+            for e in &events {
+                println!(
+                    "[+{}ms] {}: {}",
+                    e.at_ms.saturating_sub(t0),
+                    e.kind.as_str(),
+                    e.detail
+                );
+            }
+        }
+    }
+    Ok(())
 }
 
 fn show_history(limit: usize) -> anyhow::Result<()> {

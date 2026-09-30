@@ -73,6 +73,12 @@ fn open_db(path: &std::path::Path) -> Result<rusqlite::Connection, CoreError> {
           CREATE TABLE IF NOT EXISTS kv (
             key TEXT PRIMARY KEY,
             value TEXT NOT NULL
+          );
+          CREATE TABLE IF NOT EXISTS session_events (
+            session TEXT NOT NULL,
+            at_ms INTEGER NOT NULL,
+            kind TEXT NOT NULL,
+            detail TEXT NOT NULL
           );",
     )
     .map_err(|e| CoreError::Storage(format!("Couldn't migrate db: {e}")))?;
@@ -380,6 +386,155 @@ impl SettingsStorePort for SqliteSettings {
     }
 }
 
+/// Append-only session event log for debugging (v0.7.0, issue 36).
+/// Recording is best-effort by contract: callers degrade, never
+/// block dictation on a broken log. Row order (rowid) is the event
+/// order; equal timestamps never reorder.
+pub struct SqliteEvents {
+    conn: std::sync::Mutex<rusqlite::Connection>,
+}
+
+impl SqliteEvents {
+    pub fn open(path: &std::path::Path) -> Result<Self, CoreError> {
+        Ok(Self {
+            conn: std::sync::Mutex::new(open_db(path)?),
+        })
+    }
+
+    pub fn record(
+        &self,
+        session: susurro_core::SessionId,
+        kind: susurro_core::EventKind,
+        detail: &str,
+    ) -> Result<(), CoreError> {
+        self.conn
+            .lock()
+            .map_err(|e| CoreError::Storage(format!("db lock poisoned: {e}")))?
+            .execute(
+                "INSERT INTO session_events (session, at_ms, kind, detail)
+                 VALUES (?1, ?2, ?3, ?4)",
+                rusqlite::params![
+                    session.to_string(),
+                    susurro_core::now_ms() as i64,
+                    kind.as_str(),
+                    detail,
+                ],
+            )
+            .map_err(|e| CoreError::Storage(e.to_string()))?;
+        Ok(())
+    }
+
+    fn sessions_matching(&self, prefix: &str) -> Result<Vec<String>, CoreError> {
+        let conn = self
+            .conn
+            .lock()
+            .map_err(|e| CoreError::Storage(format!("db lock poisoned: {e}")))?;
+        let mut stmt = conn
+            .prepare("SELECT DISTINCT session FROM session_events WHERE session LIKE ?1 || '%'")
+            .map_err(|e| CoreError::Storage(e.to_string()))?;
+        let out = stmt
+            .query_map(rusqlite::params![prefix], |row| row.get(0))
+            .map_err(|e| CoreError::Storage(e.to_string()))?
+            .collect::<Result<Vec<String>, _>>()
+            .map_err(|e| CoreError::Storage(e.to_string()));
+        out
+    }
+
+    /// Events for one session by id prefix. Empty prefix matches
+    /// nothing: pass nothing to list sessions instead. Ambiguous
+    /// prefixes name their candidates instead of guessing.
+    pub fn replay(&self, prefix: &str) -> Result<Vec<susurro_core::SessionEvent>, CoreError> {
+        if prefix.trim().is_empty() {
+            return Err(CoreError::Storage(
+                "empty session id. Run susurro replay to list sessions.".into(),
+            ));
+        }
+        let mut matches = self.sessions_matching(prefix.trim())?;
+        if matches.is_empty() {
+            return Err(CoreError::Storage(format!(
+                "no session starting with '{prefix}'. Run susurro replay to list sessions."
+            )));
+        }
+        if matches.len() > 1 {
+            matches.sort();
+            let mut shown = matches
+                .iter()
+                .take(5)
+                .cloned()
+                .collect::<Vec<_>>()
+                .join(", ");
+            if matches.len() > 5 {
+                shown.push_str(&format!(" ({} more)", matches.len() - 5));
+            }
+            return Err(CoreError::Storage(format!(
+                "ambiguous session prefix '{prefix}': {shown}"
+            )));
+        }
+        let session_hex = matches.pop().unwrap_or_default();
+        let conn = self
+            .conn
+            .lock()
+            .map_err(|e| CoreError::Storage(format!("db lock poisoned: {e}")))?;
+        let mut stmt = conn
+            .prepare(
+                "SELECT session, at_ms, kind, detail FROM session_events
+                 WHERE session = ?1 ORDER BY rowid",
+            )
+            .map_err(|e| CoreError::Storage(e.to_string()))?;
+        let rows = stmt
+            .query_map(rusqlite::params![session_hex], |row| {
+                let hex: String = row.get(0)?;
+                let session = u128::from_str_radix(&hex, 16).unwrap_or(0);
+                let kind_raw: String = row.get(2)?;
+                // Corrupt kinds cannot be interpreted, so they drop:
+                // replay never invents history.
+                let kind = match susurro_core::EventKind::parse(&kind_raw) {
+                    Some(k) => k,
+                    None => return Ok(None),
+                };
+                Ok(Some(susurro_core::SessionEvent {
+                    session: susurro_core::SessionId::new(session),
+                    at_ms: row.get::<_, i64>(1)? as u64,
+                    kind,
+                    detail: row.get(3)?,
+                }))
+            })
+            .map_err(|e| CoreError::Storage(e.to_string()))?;
+        let out = rows
+            .collect::<Result<Vec<_>, _>>()
+            .map_err(|e| CoreError::Storage(e.to_string()))?
+            .into_iter()
+            .flatten()
+            .collect::<Vec<_>>();
+        Ok(out)
+    }
+
+    /// Recent sessions, newest first: full id, event count, first stamp.
+    // allow(let_and_return): binding forces the row iterator to drop
+    // before the statement guard (borrowck E0597 otherwise).
+    #[allow(clippy::let_and_return)]
+    pub fn recent_sessions(&self, limit: usize) -> Result<Vec<(String, i64, i64)>, CoreError> {
+        let conn = self
+            .conn
+            .lock()
+            .map_err(|e| CoreError::Storage(format!("db lock poisoned: {e}")))?;
+        let mut stmt = conn
+            .prepare(
+                "SELECT session, COUNT(*), MIN(at_ms) FROM session_events
+                 GROUP BY session ORDER BY MAX(rowid) DESC LIMIT ?",
+            )
+            .map_err(|e| CoreError::Storage(e.to_string()))?;
+        let out = stmt
+            .query_map([limit as i64], |row| {
+                Ok((row.get(0)?, row.get(1)?, row.get(2)?))
+            })
+            .map_err(|e| CoreError::Storage(e.to_string()))?
+            .collect::<Result<Vec<(String, i64, i64)>, _>>()
+            .map_err(|e| CoreError::Storage(e.to_string()));
+        out
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -470,6 +625,72 @@ mod tests {
         // New handle on the same db sees the value.
         let s2 = SqliteSettings::open(&p).unwrap();
         assert_eq!(s2.get("model_tier").unwrap().as_deref(), Some("small"));
+        let _ = std::fs::remove_file(&p);
+    }
+
+    #[test]
+    fn events_replay_in_order_by_prefix() {
+        use susurro_core::EventKind;
+        let p = tmp_path("events");
+        let log = SqliteEvents::open(&p).unwrap();
+        let a = susurro_core::SessionId::new(0xabc001);
+        let b = susurro_core::SessionId::new(0xdef002);
+        for (session, kind, detail) in [
+            (a, EventKind::Started, "model m"),
+            (a, EventKind::Stage, "transcribing"),
+            (a, EventKind::Done, "42ms"),
+            (b, EventKind::Started, "model m"),
+        ] {
+            log.record(session, kind, detail).unwrap();
+        }
+        let hex_a = a.to_string();
+        let events = log.replay(&hex_a).unwrap();
+        assert_eq!(events.len(), 3);
+        assert_eq!(events[0].kind, EventKind::Started);
+        assert_eq!(events[1].detail, "transcribing");
+        assert_eq!(events[2].kind, EventKind::Done);
+        assert!(events.windows(2).all(|w| w[0].at_ms <= w[1].at_ms));
+        // Shorter unique prefix resolves too (ids differ mid-hex).
+        assert_eq!(log.replay(&hex_a[..28]).unwrap().len(), 3);
+        let _ = std::fs::remove_file(&p);
+    }
+
+    #[test]
+    fn replay_rejects_empty_unknown_and_ambiguous() {
+        use susurro_core::EventKind;
+        let p = tmp_path("events-reject");
+        let log = SqliteEvents::open(&p).unwrap();
+        assert!(log.replay("").is_err());
+        assert!(log.replay("  ").is_err());
+        assert!(log.replay("deadbee").is_err());
+        // Two sessions sharing a long prefix: ambiguous.
+        let a = susurro_core::SessionId::new(0xabc001);
+        let b = susurro_core::SessionId::new(0xabc002);
+        log.record(a, EventKind::Started, "x").unwrap();
+        log.record(b, EventKind::Started, "y").unwrap();
+        let shared = &a.to_string()[..16];
+        assert!(b.to_string().starts_with(shared));
+        let err = log.replay(shared).unwrap_err().to_string();
+        assert!(err.contains("ambiguous"), "{err}");
+        let _ = std::fs::remove_file(&p);
+    }
+
+    #[test]
+    fn recent_sessions_lists_newest_first() {
+        use susurro_core::EventKind;
+        let p = tmp_path("events-recent");
+        let log = SqliteEvents::open(&p).unwrap();
+        let a = susurro_core::SessionId::new(1);
+        let b = susurro_core::SessionId::new(2);
+        log.record(a, EventKind::Started, "x").unwrap();
+        log.record(a, EventKind::Done, "y").unwrap();
+        log.record(b, EventKind::Started, "z").unwrap();
+        let recent = log.recent_sessions(10).unwrap();
+        assert_eq!(recent.len(), 2);
+        assert_eq!(recent[0].0, b.to_string());
+        assert_eq!(recent[0].1, 1);
+        assert_eq!(recent[1].0, a.to_string());
+        assert_eq!(recent[1].1, 2);
         let _ = std::fs::remove_file(&p);
     }
 }
