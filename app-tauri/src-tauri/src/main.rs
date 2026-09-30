@@ -32,7 +32,7 @@ impl Default for Settings {
             auto_stop: true,
             sound: true,
             cleanup: "ollama".into(),
-            ollama_model: "qwen2.5:0.5b".into(),
+            ollama_model: "qwen3:0.6b".into(),
             whisper_model: String::new(),
             device: String::new(),
             socket_path: "/tmp/susurro.sock".into(),

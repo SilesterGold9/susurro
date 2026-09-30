@@ -19,7 +19,7 @@ const DEFAULTS: Settings = {
   auto_stop: true,
   sound: true,
   cleanup: "ollama",
-  ollama_model: "qwen2.5:0.5b",
+  ollama_model: "qwen3:0.6b",
   whisper_model: "",
   device: "",
   socket_path: "/tmp/susurro.sock",

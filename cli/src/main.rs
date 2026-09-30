@@ -54,7 +54,7 @@ enum Cmd {
         #[arg(long, default_value = "none")]
         cleanup: String,
         /// Ollama model for --cleanup ollama.
-        #[arg(long, default_value = "qwen2.5:0.5b")]
+        #[arg(long, default_value = "qwen3:0.6b")]
         ollama_model: String,
         /// Focused app override for privacy routing. Defaults to Hyprland
         /// auto-detect; blocklisted apps force local-only STT.
@@ -92,7 +92,7 @@ enum Cmd {
         sound: bool,
         #[arg(long, default_value = "none")]
         cleanup: String,
-        #[arg(long, default_value = "qwen2.5:0.5b")]
+        #[arg(long, default_value = "qwen3:0.6b")]
         ollama_model: String,
         /// Focused app override for privacy routing. Defaults to Hyprland
         /// auto-detect; blocklisted apps force local-only STT.
@@ -426,11 +426,11 @@ fn doctor() -> anyhow::Result<()> {
             let body = String::from_utf8_lossy(&o.stdout);
             println!("ollama server: up");
             println!(
-                "ollama model qwen2.5:0.5b: {}",
-                if body.contains("qwen2.5:0.5b") {
+                "ollama model qwen3:0.6b: {}",
+                if body.contains("qwen3:0.6b") {
                     "pulled"
                 } else {
-                    "missing — ollama pull qwen2.5:0.5b"
+                    "missing — ollama pull qwen3:0.6b"
                 }
             );
         }
