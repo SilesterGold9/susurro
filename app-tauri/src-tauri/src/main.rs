@@ -587,12 +587,74 @@ fn finish_onboarding(hotkey: String, state: State<'_, Arc<AppState>>) -> Result<
 }
 
 #[derive(Clone, Serialize)]
+struct SnippetRow {
+    trigger: String,
+    expansion: String,
+}
+
+/// List spoken snippets for the Snippets page.
+#[tauri::command]
+fn list_snippets() -> Result<Vec<SnippetRow>, String> {
+    let store = susurro_storage::SqliteSnippets::open(&shared_db_path())
+        .map_err(|e| e.to_string())?;
+    let snippets = store.list().map_err(|e| e.to_string())?;
+    Ok(snippets
+        .into_iter()
+        .map(|s| SnippetRow {
+            trigger: s.trigger,
+            expansion: s.expansion,
+        })
+        .collect())
+}
+
+/// Add or overwrite a spoken snippet.
+#[tauri::command]
+fn save_snippet(trigger: String, expansion: String) -> Result<(), String> {
+    let store = susurro_storage::SqliteSnippets::open(&shared_db_path())
+        .map_err(|e| e.to_string())?;
+    store.set(&trigger, &expansion).map_err(|e| e.to_string())
+}
+
+/// Remove a spoken snippet by trigger.
+#[tauri::command]
+fn remove_snippet(trigger: String) -> Result<(), String> {
+    let store = susurro_storage::SqliteSnippets::open(&shared_db_path())
+        .map_err(|e| e.to_string())?;
+    store.remove(&trigger).map_err(|e| e.to_string())
+}
+
+/// List dictionary phrases for the Dictionary page.
+#[tauri::command]
+fn list_dictionary() -> Result<Vec<String>, String> {
+    let store = susurro_storage::SqliteDictionary::open(&shared_db_path())
+        .map_err(|e| e.to_string())?;
+    store.list().map_err(|e| e.to_string())
+}
+
+/// Add a dictionary phrase.
+#[tauri::command]
+fn save_word(phrase: String) -> Result<(), String> {
+    let store = susurro_storage::SqliteDictionary::open(&shared_db_path())
+        .map_err(|e| e.to_string())?;
+    store.add(&phrase).map_err(|e| e.to_string())
+}
+
+/// Remove a dictionary phrase.
+#[tauri::command]
+fn remove_word(phrase: String) -> Result<(), String> {
+    let store = susurro_storage::SqliteDictionary::open(&shared_db_path())
+        .map_err(|e| e.to_string())?;
+    store.remove(&phrase).map_err(|e| e.to_string())
+}
+
+#[derive(Clone, Serialize)]
 struct HistoryRow {
     session: String,
     raw_text: String,
     cleaned_text: Option<String>,
     provider: String,
     latency_ms: u64,
+    created_at: i64,
 }
 
 #[tauri::command]
@@ -610,6 +672,7 @@ fn list_history(limit: u64) -> Result<Vec<HistoryRow>, String> {
             cleaned_text: e.cleaned_text,
             provider: e.provider,
             latency_ms: e.latency_ms,
+            created_at: e.created_at,
         })
         .collect())
 }
@@ -1269,6 +1332,12 @@ fn main() {
             list_format_profiles,
             save_format_profile,
             remove_format_profile,
+            list_snippets,
+            save_snippet,
+            remove_snippet,
+            list_dictionary,
+            save_word,
+            remove_word,
             onboarding_status,
             requirements_status,
             download_model,

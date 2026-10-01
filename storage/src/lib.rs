@@ -74,10 +74,14 @@ fn open_db(path: &std::path::Path) -> Result<rusqlite::Connection, CoreError> {
            CREATE TABLE IF NOT EXISTS privacy_apps (
              app TEXT PRIMARY KEY
            );
-           CREATE TABLE IF NOT EXISTS app_profiles (
-             app TEXT PRIMARY KEY,
-             style TEXT NOT NULL
-           );
+          CREATE TABLE IF NOT EXISTS app_profiles (
+            app TEXT PRIMARY KEY,
+            style TEXT NOT NULL
+          );
+          CREATE TABLE IF NOT EXISTS snippets (
+            trigger TEXT PRIMARY KEY,
+            expansion TEXT NOT NULL
+          );
           CREATE TABLE IF NOT EXISTS kv (
             key TEXT PRIMARY KEY,
             value TEXT NOT NULL
@@ -317,6 +321,82 @@ impl SqliteDictionary {
     /// Comma-joined prompt for whisper's initial-prompt bias.
     pub fn prompt(&self) -> Result<String, CoreError> {
         Ok(self.list()?.join(", "))
+    }
+}
+
+/// Spoken shortcuts (UI clone): saying the trigger injects the
+/// expansion. Storage plus CRUD only; the expansion engine that
+/// rewrites transcripts is a follow-up.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Snippet {
+    pub trigger: String,
+    pub expansion: String,
+}
+
+pub struct SqliteSnippets {
+    conn: std::sync::Mutex<rusqlite::Connection>,
+}
+
+impl SqliteSnippets {
+    pub fn open(path: &std::path::Path) -> Result<Self, CoreError> {
+        Ok(Self {
+            conn: std::sync::Mutex::new(open_db(path)?),
+        })
+    }
+
+    pub fn set(&self, trigger: &str, expansion: &str) -> Result<(), CoreError> {
+        let (trigger, expansion) = (trigger.trim(), expansion.trim());
+        if trigger.is_empty() {
+            return Err(CoreError::Storage("empty trigger".into()));
+        }
+        if expansion.is_empty() {
+            return Err(CoreError::Storage("empty expansion".into()));
+        }
+        self.conn
+            .lock()
+            .map_err(|e| CoreError::Storage(format!("db lock poisoned: {e}")))?
+            .execute(
+                "INSERT INTO snippets (trigger, expansion) VALUES (?1, ?2)
+                 ON CONFLICT(trigger) DO UPDATE SET expansion = excluded.expansion",
+                rusqlite::params![trigger.to_lowercase(), expansion],
+            )
+            .map_err(|e| CoreError::Storage(e.to_string()))?;
+        Ok(())
+    }
+
+    pub fn remove(&self, trigger: &str) -> Result<(), CoreError> {
+        self.conn
+            .lock()
+            .map_err(|e| CoreError::Storage(format!("db lock poisoned: {e}")))?
+            .execute(
+                "DELETE FROM snippets WHERE trigger = ?1",
+                rusqlite::params![trigger.trim().to_lowercase()],
+            )
+            .map_err(|e| CoreError::Storage(e.to_string()))?;
+        Ok(())
+    }
+
+    // allow(let_and_return): same borrowck drop-order constraint as recent().
+    #[allow(clippy::let_and_return)]
+    pub fn list(&self) -> Result<Vec<Snippet>, CoreError> {
+        let conn = self
+            .conn
+            .lock()
+            .map_err(|e| CoreError::Storage(format!("db lock poisoned: {e}")))?;
+        let mut stmt = conn
+            .prepare("SELECT trigger, expansion FROM snippets ORDER BY trigger")
+            .map_err(|e| CoreError::Storage(e.to_string()))?;
+        let out = stmt
+            .query_map([], |row| {
+                Ok(Snippet {
+                    trigger: row.get(0)?,
+                    expansion: row.get(1)?,
+                })
+            })
+            .map_err(|e| CoreError::Storage(e.to_string()))?
+            .collect::<Result<Vec<Snippet>, _>>()
+            .map_err(|e| CoreError::Storage(e.to_string()));
+        out
     }
 }
 
@@ -771,8 +851,25 @@ mod tests {
     }
 
     #[test]
+    fn snippets_roundtrip() {
+        let p = tmp_path("snippets");
+        let s = SqliteSnippets::open(&p).unwrap();
+        assert!(s.list().unwrap().is_empty());
+        s.set("My Email", "me@example.com").unwrap();
+        s.set("my email", "me2@example.com").unwrap();
+        let list = s.list().unwrap();
+        assert_eq!(list.len(), 1);
+        assert_eq!(list[0].trigger, "my email");
+        assert_eq!(list[0].expansion, "me2@example.com");
+        assert!(s.set("  ", "x").is_err());
+        assert!(s.set("y", "  ").is_err());
+        s.remove("MY EMAIL").unwrap();
+        assert!(s.list().unwrap().is_empty());
+        let _ = std::fs::remove_file(&p);
+    }
+
+    #[test]
     fn settings_roundtrip_and_overwrite() {
-        use susurro_core::ports::SettingsStorePort;
         let p = tmp_path("settings");
         let mut s = SqliteSettings::open(&p).unwrap();
         assert_eq!(s.get("model_tier").unwrap(), None);

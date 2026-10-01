@@ -40,6 +40,7 @@ export interface HistoryRow {
   cleaned_text: string | null;
   provider: string;
   latency_ms: number;
+  created_at: number;
 }
 
 export interface FormatProfileRow {

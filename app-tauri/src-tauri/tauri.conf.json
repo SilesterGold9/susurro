@@ -29,10 +29,10 @@
       },
       {
         "label": "settings",
-        "title": "Susurro settings",
+        "title": "Susurro",
         "url": "/",
-        "width": 480,
-        "height": 720,
+        "width": 1120,
+        "height": 760,
         "visible": false
       },
       {

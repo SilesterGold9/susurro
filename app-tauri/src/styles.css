@@ -341,3 +341,206 @@ button.ghost {
 .high-contrast :focus-visible {
   outline-width: 3px;
 }
+/* App shell (Flow-like layout, susurro voice): cream canvas, ink
+   text, serif display lines, black pill buttons. All original,
+   no borrowed artwork: heroes are gradients, icons are glyphs. */
+.flow {
+  display: flex;
+  min-height: 100vh;
+  background: #f6f4ed;
+  color: #1b1a17;
+  font-family: Inter, system-ui, sans-serif;
+  font-size: 14px;
+}
+.flow-side {
+  width: 208px;
+  flex: none;
+  background: #edeae0;
+  padding: 20px 14px;
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+.flow-brand {
+  font-weight: 800;
+  font-size: 19px;
+  letter-spacing: -0.3px;
+  padding: 2px 10px 16px;
+}
+.flow-brand .comma { color: var(--coral); }
+.flow-side nav { display: flex; flex-direction: column; gap: 2px; }
+.flow-foot { margin-top: auto; display: flex; flex-direction: column; gap: 2px; }
+.flow-nav {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  width: 100%;
+  padding: 8px 10px;
+  border: none;
+  border-radius: 10px;
+  background: transparent;
+  color: inherit;
+  font: inherit;
+  cursor: pointer;
+  text-align: left;
+}
+.flow-nav:hover { background: #00000010; }
+.flow-nav.active { background: #00000014; font-weight: 600; }
+.flow-nav .glyph {
+  width: 20px;
+  text-align: center;
+  opacity: 0.75;
+  font-size: 14px;
+}
+.flow-main { flex: 1; min-width: 0; overflow-y: auto; }
+.flow-page { padding: 28px 36px 60px; max-width: 860px; }
+.flow-cols { display: flex; gap: 28px; padding: 28px 36px 60px; }
+.flow-cols .flow-page { padding: 0; flex: 1; }
+.flow-rail { width: 220px; flex: none; display: flex; flex-direction: column; gap: 18px; padding-top: 64px; }
+.flow-title {
+  font-family: Georgia, "Times New Roman", serif;
+  font-weight: 500;
+  font-size: 30px;
+  margin: 0 0 18px;
+  letter-spacing: -0.3px;
+}
+.flow-greet { font-size: 21px; font-weight: 600; margin: 0 0 18px; }
+.flow-day {
+  font-size: 12px;
+  font-weight: 600;
+  letter-spacing: 1.2px;
+  text-transform: uppercase;
+  opacity: 0.55;
+  margin: 26px 0 10px;
+}
+.flow-hero {
+  border-radius: 20px;
+  padding: 34px 36px;
+  color: #f6f4ed;
+  background:
+    radial-gradient(120% 160% at 85% 20%, #4a3b2a 0%, transparent 55%),
+    radial-gradient(100% 140% at 100% 90%, #54402c 0%, transparent 50%),
+    linear-gradient(100deg, #141210 55%, #241d14 100%);
+  margin-bottom: 8px;
+}
+.flow-hero-dict {
+  background:
+    radial-gradient(120% 160% at 80% 30%, #3d3227 0%, transparent 55%),
+    linear-gradient(100deg, #171310 60%, #2b2115 100%);
+}
+.flow-hero h2 {
+  font-family: Georgia, "Times New Roman", serif;
+  font-weight: 500;
+  font-size: 30px;
+  margin: 0 0 10px;
+  letter-spacing: -0.3px;
+}
+.flow-hero p { opacity: 0.85; margin: 0 0 18px; max-width: 520px; }
+.flow-light {
+  background: #f6f4ed;
+  color: #1b1a17;
+  border: none;
+  border-radius: 12px;
+  padding: 10px 18px;
+  font: inherit;
+  font-weight: 600;
+  cursor: pointer;
+}
+.flow-dark {
+  background: #1b1a17;
+  color: #f6f4ed;
+  border: none;
+  border-radius: 12px;
+  padding: 10px 18px;
+  font: inherit;
+  font-weight: 600;
+  cursor: pointer;
+}
+.flow-card {
+  background: #fffdf8;
+  border: 1px solid #00000012;
+  border-radius: 18px;
+  overflow: hidden;
+}
+.flow-pad { padding: 20px 22px; }
+.flow-row {
+  display: flex;
+  align-items: baseline;
+  gap: 16px;
+  padding: 13px 20px;
+  border-bottom: 1px solid #0000000d;
+}
+.flow-row:last-child { border-bottom: none; }
+.flow-time { width: 76px; flex: none; opacity: 0.55; font-size: 13px; }
+.flow-text { flex: 1; min-width: 0; line-height: 1.45; }
+.flow-arrow { opacity: 0.45; }
+.flow-actions { display: flex; gap: 8px; flex: none; opacity: 0; }
+.flow-row:hover .flow-actions, .flow-row:focus-within .flow-actions { opacity: 1; }
+.flow-mini {
+  background: transparent;
+  border: 1px solid #00000022;
+  border-radius: 8px;
+  padding: 4px 10px;
+  font-size: 12px;
+  cursor: pointer;
+  color: inherit;
+}
+.flow-empty { padding: 22px 20px; opacity: 0.6; }
+.flow-note { font-family: var(--mono); font-size: 12px; opacity: 0.75; margin: 12px 0; }
+.flow-head { display: flex; align-items: center; justify-content: space-between; margin-bottom: 16px; }
+.flow-head .flow-title { margin: 0; }
+.flow-search {
+  border: 1px solid #0000001f !important;
+  border-radius: 10px !important;
+  padding: 8px 12px !important;
+  background: #fffdf8 !important;
+  width: auto !important;
+  font-family: inherit !important;
+  font-size: 13px !important;
+}
+.flow-stat { font-size: 14px; }
+.flow-stat strong {
+  font-family: Georgia, serif;
+  font-weight: 500;
+  font-size: 30px;
+  display: block;
+  line-height: 1.1;
+}
+.flow-grid3 { display: grid; grid-template-columns: repeat(3, 1fr); gap: 16px; margin-bottom: 16px; }
+.flow-grid2 { display: grid; grid-template-columns: 1fr 1fr; gap: 16px; }
+.flow-bignum {
+  font-family: Georgia, serif;
+  font-size: 34px;
+  font-weight: 500;
+  line-height: 1.1;
+}
+.flow-cap {
+  font-size: 11px;
+  letter-spacing: 1px;
+  text-transform: uppercase;
+  opacity: 0.6;
+  margin-top: 6px;
+}
+.flow-sub { opacity: 0.65; font-size: 13px; margin-top: 8px; line-height: 1.5; }
+.flow-h3 { font-size: 16px; margin: 0 0 12px; }
+.flow-serif { font-family: Georgia, serif; font-size: 30px; font-weight: 500; }
+.flow-pick { cursor: pointer; text-align: left; font: inherit; color: inherit; width: 100%; }
+.flow-pick.picked { border: 2px solid #6d5bd0; }
+.flow-mono { font-family: var(--mono); font-size: 12px; white-space: pre-wrap; }
+.flow-bar-row { display: flex; align-items: center; gap: 10px; margin: 8px 0; }
+.flow-bar-label { width: 110px; flex: none; font-size: 13px; }
+.flow-bar-track { flex: 1; height: 8px; border-radius: 4px; background: #00000012; overflow: hidden; }
+.flow-bar-fill { display: block; height: 100%; background: var(--teal); border-radius: 4px; }
+.flow-bar-num { width: 90px; flex: none; text-align: right; font-size: 12px; opacity: 0.7; }
+/* High contrast carries into the shell. */
+.high-contrast .flow, .flow.high-contrast {
+  background: #fff;
+  color: #000;
+}
+.high-contrast .flow-side { background: #eee; }
+.high-contrast .flow-card { border: 2px solid #000; }
+.high-contrast .flow-hero { background: #000; }
+.high-contrast .flow-dark { background: #000; border: 2px solid #000; }
+@media (prefers-reduced-motion: reduce) {
+  .flow * { animation: none !important; transition: none !important; }
+}

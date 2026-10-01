@@ -2,8 +2,8 @@ import React from "react";
 import ReactDOM from "react-dom/client";
 import { getCurrentWindow } from "@tauri-apps/api/window";
 import Pill from "./pill";
-import SettingsView from "./settings";
 import OnboardingView from "./onboarding";
+import Shell from "./shell";
 import "./styles.css";
 
 function App() {
@@ -13,9 +13,9 @@ function App() {
       setLabel(getCurrentWindow().label);
     } catch {}
   }, []);
-  if (label === "settings") return <SettingsView />;
+  if (label === "pill") return <Pill />;
   if (label === "onboarding") return <OnboardingView />;
-  return <Pill />;
+  return <Shell />;
 }
 
 ReactDOM.createRoot(document.getElementById("root")!).render(

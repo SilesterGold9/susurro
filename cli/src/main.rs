@@ -152,6 +152,12 @@ enum Cmd {
     DictRemove { phrase: String },
     /// List custom dictionary phrases.
     DictList,
+    /// Set a spoken snippet: saying the trigger injects the expansion.
+    SnippetAdd { trigger: String, expansion: String },
+    /// Remove a spoken snippet by trigger.
+    SnippetRemove { trigger: String },
+    /// List spoken snippets.
+    SnippetList,
     /// Store a cloud API key in the OS keyring (groq or nim).
     /// Reads the secret from stdin so it never lands in shell history.
     /// Example: echo -n "key" | susurro key-set groq.
@@ -313,6 +319,9 @@ fn main() -> anyhow::Result<()> {
         Cmd::DictAdd { phrase } => dict_add(&phrase),
         Cmd::DictRemove { phrase } => dict_remove(&phrase),
         Cmd::DictList => dict_list(),
+        Cmd::SnippetAdd { trigger, expansion } => snippet_add(&trigger, &expansion),
+        Cmd::SnippetRemove { trigger } => snippet_remove(&trigger),
+        Cmd::SnippetList => snippet_list(),
         Cmd::KeySet { provider, from_env } => key_set(&provider, from_env.as_deref()),
         Cmd::KeyClear { provider } => key_clear(&provider),
         Cmd::PrivacyAdd { app } => privacy_add(&app),
@@ -1849,6 +1858,40 @@ fn dict_list() -> anyhow::Result<()> {
     } else {
         for p in phrases {
             println!("- {p}");
+        }
+    }
+    Ok(())
+}
+
+fn snippet_add(trigger: &str, expansion: &str) -> anyhow::Result<()> {
+    let s = susurro_storage::SqliteSnippets::open(&db_path())
+        .map_err(|e| anyhow::anyhow!("Couldn't open snippets: {e}"))?;
+    s.set(trigger, expansion)
+        .map_err(|e| anyhow::anyhow!("Couldn't add snippet: {e}"))?;
+    println!("snippet: {} expands", trigger.trim().to_lowercase());
+    Ok(())
+}
+
+fn snippet_remove(trigger: &str) -> anyhow::Result<()> {
+    let s = susurro_storage::SqliteSnippets::open(&db_path())
+        .map_err(|e| anyhow::anyhow!("Couldn't open snippets: {e}"))?;
+    s.remove(trigger)
+        .map_err(|e| anyhow::anyhow!("Couldn't remove snippet: {e}"))?;
+    println!("snippet removed: {}", trigger.trim().to_lowercase());
+    Ok(())
+}
+
+fn snippet_list() -> anyhow::Result<()> {
+    let s = susurro_storage::SqliteSnippets::open(&db_path())
+        .map_err(|e| anyhow::anyhow!("Couldn't open snippets: {e}"))?;
+    let snippets = s
+        .list()
+        .map_err(|e| anyhow::anyhow!("Couldn't list snippets: {e}"))?;
+    if snippets.is_empty() {
+        println!("no snippets. Say it once, reuse forever: snippet-add <trigger> <expansion>");
+    } else {
+        for item in snippets {
+            println!("{} -> {}", item.trigger, item.expansion);
         }
     }
     Ok(())
