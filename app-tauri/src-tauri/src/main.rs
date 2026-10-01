@@ -35,7 +35,7 @@ struct Settings {
 }
 
 fn default_hotkey() -> String {
-    "super_shift_r".into()
+    susurro_core::hotkey::DEFAULT.into()
 }
 
 fn default_announce() -> bool {
@@ -65,11 +65,32 @@ impl Default for Settings {
 struct AppState {
     settings: Mutex<Settings>,
     dir: PathBuf,
+    /// Double-trigger guard: at most one dictation runs at a time.
+    /// A second press while busy reports busy instead of stacking runs.
+    inflight: std::sync::Arc<std::sync::atomic::AtomicBool>,
 }
 
 impl AppState {
     fn settings_file(dir: &std::path::Path) -> PathBuf {
         dir.join("settings.json")
+    }
+
+    /// Claim the single dictation slot. False means a run is already
+    /// in flight and the new trigger must stand down.
+    fn try_claim(&self) -> bool {
+        self.inflight
+            .compare_exchange(
+                false,
+                true,
+                std::sync::atomic::Ordering::SeqCst,
+                std::sync::atomic::Ordering::SeqCst,
+            )
+            .is_ok()
+    }
+
+    fn release(&self) {
+        self.inflight
+            .store(false, std::sync::atomic::Ordering::SeqCst);
     }
 
     fn load(dir: &std::path::Path) -> Settings {
@@ -152,6 +173,12 @@ fn get_settings(state: State<'_, Arc<AppState>>) -> Settings {
 
 #[tauri::command]
 fn save_settings(settings: Settings, state: State<'_, Arc<AppState>>) -> Result<(), String> {
+    // Mirror the hotkey into the shared kv store so the CLI daemon
+    // honors a GUI remap. Best-effort, never fails the save.
+    if let Ok(mut store) = susurro_storage::SqliteSettings::open(&shared_db_path()) {
+        use susurro_core::ports::SettingsStorePort;
+        let _ = store.set("hotkey", &settings.hotkey);
+    }
     *state.settings.lock().map_err(|e| e.to_string())? = settings;
     state.save()
 }
@@ -420,6 +447,32 @@ fn requirements_status(state: State<'_, Arc<AppState>>) -> Result<serde_json::Va
     } else {
         "Install whisper.cpp (distro package or build from source) so whisper-cli is on PATH, then recheck.".into()
     };
+    // Cleanup chain (Windows audit): the Ollama API is identical on
+    // every OS, so one probe covers all. The model must be pulled,
+    // not just the server up.
+    let ollama_models = susurro_core::silent_command("curl")
+        .args(["-sS", "-m", "5", "http://localhost:11434/api/tags"])
+        .output()
+        .ok()
+        .filter(|o| o.status.success())
+        .map(|o| String::from_utf8_lossy(&o.stdout).into_owned())
+        .unwrap_or_default();
+    let ollama_up = !ollama_models.is_empty();
+    let ollama_model_present =
+        ollama_models.contains(&settings.ollama_model);
+    let ollama_hint = if ollama_up && ollama_model_present {
+        String::new()
+    } else if os == "windows" {
+        format!(
+            "Install Ollama for Windows, then run ollama pull {} so cleanup has its model.",
+            settings.ollama_model
+        )
+    } else {
+        format!(
+            "Start Ollama and run ollama pull {} so cleanup has its model.",
+            settings.ollama_model
+        )
+    };
     Ok(serde_json::json!({
         "os": os,
         "whisper": whisper,
@@ -428,6 +481,9 @@ fn requirements_status(state: State<'_, Arc<AppState>>) -> Result<serde_json::Va
         "paste_ok": paste_ok,
         "paste_detail": paste_detail,
         "whisper_hint": whisper_hint,
+        "ollama_up": ollama_up,
+        "ollama_model_present": ollama_model_present,
+        "ollama_hint": ollama_hint,
     }))
 }
 
@@ -552,10 +608,15 @@ fn test_dictation(
     app: AppHandle,
     state: State<'_, Arc<AppState>>,
 ) -> Result<UtteranceResult, String> {
+    if !state.try_claim() {
+        return Err("already dictating. Wait for this run to finish.".into());
+    }
     let mut settings = state.settings.lock().map_err(|e| e.to_string())?.clone();
     settings.seconds = 6;
     let tickets = TicketRegistry::new();
-    run_dictation(&app, &settings, &tickets)
+    let out = run_dictation(&app, &settings, &tickets);
+    state.release();
+    out
 }
 
 /// Hyprland bind line for a hotkey choice, same names as the CLI
@@ -573,11 +634,16 @@ fn hotkey_snippet(hotkey: String) -> String {
 /// Finish onboarding: store the hotkey choice and close the flow.
 /// First run never returns after this; settings opens instead.
 #[tauri::command]
-fn finish_onboarding(hotkey: String, state: State<'_, Arc<AppState>>) -> Result<(), String> {
-    let hotkey = match hotkey.trim().to_lowercase().as_str() {
-        "ctrl_shift_r" | "shift_d" => hotkey.trim().to_lowercase(),
-        _ => default_hotkey(),
-    };
+fn finish_onboarding(
+    hotkey: String,
+    state: State<'_, Arc<AppState>>,
+) -> Result<(), String> {
+    let hotkey =
+        susurro_core::hotkey::normalize(&hotkey).unwrap_or_else(|_| default_hotkey());
+    if let Ok(mut store) = susurro_storage::SqliteSettings::open(&shared_db_path()) {
+        use susurro_core::ports::SettingsStorePort;
+        let _ = store.set("hotkey", &hotkey);
+    }
     {
         let mut settings = state.settings.lock().map_err(|e| e.to_string())?;
         settings.hotkey = hotkey;
@@ -1208,15 +1274,21 @@ fn pill_drag_move(address: String, x: i32, y: i32) -> Result<(), String> {
 }
 
 /// Frontend-invoked dictation (pill button / tray). Blocks; progress via events.
+/// A second trigger while busy reports busy instead of stacking runs.
 #[tauri::command]
 fn start_dictation(
     app: AppHandle,
     state: State<'_, Arc<AppState>>,
 ) -> Result<UtteranceResult, String> {
+    if !state.try_claim() {
+        return Err("already dictating. Wait for this run to finish.".into());
+    }
     let settings = state.settings.lock().map_err(|e| e.to_string())?.clone();
     let tickets = TicketRegistry::new();
     show_pill(&app, settings.sound);
-    run_dictation(&app, &settings, &tickets)
+    let out = run_dictation(&app, &settings, &tickets);
+    state.release();
+    out
 }
 
 /// Background hotkey listener: each press dictates. The hotkey is
@@ -1256,9 +1328,15 @@ fn spawn_hotkey_listener(app: AppHandle, state: Arc<AppState>) {
                 std::thread::sleep(std::time::Duration::from_secs(1));
                 continue;
             }
+            // A press mid-run is a bounce, not a queue: the in-flight
+            // run owns the mic until it finishes.
+            if !state.try_claim() {
+                continue;
+            }
             show_pill(&app, state.settings.lock().map(|s| s.sound).unwrap_or(true));
             let settings = state.settings.lock().map(|s| s.clone()).unwrap_or_default();
             let _ = run_dictation(&app, &settings, &tickets);
+            state.release();
         }
     });
 }
@@ -1283,9 +1361,13 @@ fn build_tray(app: &AppHandle) -> Result<(), Box<dyn std::error::Error>> {
                 show_pill(app, sound);
                 std::thread::spawn(move || {
                     let state: State<'_, Arc<AppState>> = handle.state();
+                    if !state.try_claim() {
+                        return;
+                    }
                     let settings = state.settings.lock().map(|s| s.clone()).unwrap_or_default();
                     let tickets = TicketRegistry::new();
                     let _ = run_dictation(&handle, &settings, &tickets);
+                    state.release();
                 });
             }
             "settings" => {
@@ -1316,6 +1398,7 @@ fn main() {
     let app_state = Arc::new(AppState {
         settings: Mutex::new(AppState::load(&ctx_dir)),
         dir: ctx_dir,
+        inflight: std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
     });
     let hotkey_state = app_state.clone();
 

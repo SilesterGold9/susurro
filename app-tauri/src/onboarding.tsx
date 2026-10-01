@@ -12,6 +12,9 @@ interface Requirements {
   paste_ok: boolean;
   paste_detail: string;
   whisper_hint: string;
+  ollama_up: boolean;
+  ollama_model_present: boolean;
+  ollama_hint: string;
 }
 
 interface OnboardingStatus {
@@ -171,6 +174,11 @@ export default function OnboardingView() {
                 {!reqs.whisper && reqs.whisper_hint && <div>{reqs.whisper_hint}</div>}
                 <div>
                   {reqs.paste_ok ? reqs.paste_detail : `paste: ${reqs.paste_detail}`}.
+                </div>
+                <div>
+                  {reqs.ollama_up && reqs.ollama_model_present
+                    ? "cleanup model ready."
+                    : `cleanup: ${reqs.ollama_hint}`}
                 </div>
               </>
             ) : (

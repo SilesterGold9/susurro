@@ -82,9 +82,10 @@ enum Cmd {
         #[arg(long, default_value = "/tmp/susurro.sock")]
         socket: String,
         /// Hotkey choice for the daemon loop: super_shift_r,
-        /// ctrl_shift_r, or shift_d. Linux listens on the socket
-        /// instead; Windows registers this combo.
-        #[arg(long, default_value = "super_shift_r")]
+        /// ctrl_shift_r, or shift_d. Empty reads the stored choice
+        /// (hotkey-set), falling back to super_shift_r. Linux
+        /// listens on the socket instead; Windows registers it.
+        #[arg(long, default_value = "")]
         hotkey: String,
         #[arg(long, default_value_t = 30)]
         seconds: u64,
@@ -179,6 +180,10 @@ enum Cmd {
     PrivacyRemove { app: String },
     /// List apps forced to local-only STT.
     PrivacyList,
+    /// Set the stored hotkey choice (super_shift_r, ctrl_shift_r,
+    /// or shift_d). The daemon and GUI read it when no explicit
+    /// choice is given.
+    HotkeySet { name: String },
     /// Set the formatting style for an app (formal, casual, verbatim).
     /// Formal polishes via the cleanup chain, casual tidies whitespace
     /// only, verbatim injects the raw transcript.
@@ -268,7 +273,7 @@ fn main() -> anyhow::Result<()> {
             turbo,
         } => daemon(
             &socket,
-            &hotkey,
+            &resolve_daemon_hotkey(&hotkey),
             &ListenOpts {
                 seconds,
                 model,
@@ -327,6 +332,7 @@ fn main() -> anyhow::Result<()> {
         Cmd::PrivacyAdd { app } => privacy_add(&app),
         Cmd::PrivacyRemove { app } => privacy_remove(&app),
         Cmd::PrivacyList => privacy_list(),
+        Cmd::HotkeySet { name } => hotkey_set(&name),
         Cmd::ProfileAdd { app, style } => profile_add(&app, &style),
         Cmd::ProfileRemove { app } => profile_remove(&app),
         Cmd::ProfileList => profile_list(),
@@ -903,6 +909,11 @@ fn doctor() -> anyhow::Result<()> {
     // path without downloading anything.
     println!("updates:");
     println!("channel: stable (beta tags publish as prereleases)");
+    let hotkey = resolve_daemon_hotkey("");
+    println!(
+        "hotkey: {hotkey} ({})",
+        susurro_core::hotkey::display_name(&hotkey)
+    );
     match susurro_core::silent_command("curl")
         .args([
             "-sSL",
@@ -1985,6 +1996,46 @@ fn profile_for_app(focused: Option<&str>) -> Option<susurro_core::FormatProfile>
         }
     };
     susurro_core::matched_profile(&profiles, focused).cloned()
+}
+
+/// Daemon hotkey precedence (hotkey engine): explicit flag wins,
+/// then the stored choice, then the default. Unknown stored values
+/// degrade to the default, never fail the daemon.
+fn resolve_daemon_hotkey(flag: &str) -> String {
+    if !flag.trim().is_empty() {
+        return susurro_core::hotkey::normalize(flag)
+            .unwrap_or_else(|_| susurro_core::hotkey::DEFAULT.into());
+    }
+    match susurro_storage::SqliteSettings::open(&db_path()) {
+        Ok(store) => stored_hotkey(&store),
+        Err(_) => susurro_core::hotkey::DEFAULT.into(),
+    }
+}
+
+/// Stored hotkey choice, validated on the way out.
+fn stored_hotkey(store: &susurro_storage::SqliteSettings) -> String {
+    use susurro_core::ports::SettingsStorePort;
+    match store.get("hotkey").unwrap_or(None) {
+        Some(name) => susurro_core::hotkey::normalize(&name)
+            .unwrap_or_else(|_| susurro_core::hotkey::DEFAULT.into()),
+        None => susurro_core::hotkey::DEFAULT.into(),
+    }
+}
+
+fn hotkey_set(name: &str) -> anyhow::Result<()> {
+    use susurro_core::ports::SettingsStorePort;
+    let name = susurro_core::hotkey::normalize(name).map_err(|e| anyhow::anyhow!("{e}"))?;
+    let mut store = susurro_storage::SqliteSettings::open(&db_path())
+        .map_err(|e| anyhow::anyhow!("Couldn't open settings: {e}"))?;
+    store
+        .set("hotkey", &name)
+        .map_err(|e| anyhow::anyhow!("Couldn't store hotkey: {e}"))?;
+    println!(
+        "hotkey: {} ({})",
+        name,
+        susurro_core::hotkey::display_name(&name)
+    );
+    Ok(())
 }
 
 fn privacy_add(app: &str) -> anyhow::Result<()> {

@@ -7,6 +7,7 @@
 pub mod error;
 pub mod event_log;
 pub mod format;
+pub mod hotkey;
 pub mod pipeline;
 pub mod ports;
 pub mod privacy;
