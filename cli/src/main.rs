@@ -297,7 +297,7 @@ fn main() -> anyhow::Result<()> {
             println!("windowrule {{");
             println!("    name = susurro_pill");
             println!("    match:class = ^(susurro-app)$");
-            println!("    match:title = ^(Susurro)$");
+            println!("    match:title = ^(Susurro Pill)$");
             println!("    float = true");
             println!("    size = 360 64");
             println!("    move = (monitor_w-360)/2 (monitor_h*0.92)");
