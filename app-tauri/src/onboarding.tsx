@@ -6,6 +6,7 @@ import type { Settings } from "./settings";
 interface OnboardingStatus {
   model_found: boolean;
   model_path: string;
+  model_checksum: string;
   tier: string | null;
   hotkey: string;
   onboarding_done: boolean;
@@ -127,7 +128,7 @@ export default function OnboardingView() {
           <div className="sub">
             {status
               ? status.model_found
-                ? `model found: ${status.model_path}.`
+                ? `model found: ${status.model_path}. Checksum ${status.model_checksum}.`
                 : `model missing: ${status.model_path}. Download base.en to continue.`
               : "checking model..."}
           </div>

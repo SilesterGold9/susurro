@@ -128,6 +128,9 @@ enum Cmd {
     /// Show usage stats: per-day words, streak, top apps, dictionary
     /// hits, plus end-to-end latency percentiles.
     Stats,
+    /// Verify the whisper model checksum (trust on first use, compare
+    /// after). Fails when the file is missing or corrupted.
+    ModelCheck,
     /// Add a phrase to the custom dictionary (whisper prompt boost).
     DictAdd { phrase: String },
     /// Remove a phrase from the custom dictionary.
@@ -285,6 +288,7 @@ fn main() -> anyhow::Result<()> {
         }
         Cmd::History { limit } => show_history(limit),
         Cmd::Stats => show_stats(),
+        Cmd::ModelCheck => model_check(),
         Cmd::DictAdd { phrase } => dict_add(&phrase),
         Cmd::DictRemove { phrase } => dict_remove(&phrase),
         Cmd::DictList => dict_list(),
@@ -674,7 +678,7 @@ fn doctor() -> anyhow::Result<()> {
             }
         );
     }
-    println!("model checksums: unverified — checksum verification lands with issue 45");
+    println!("model checksums: {}", model_checksum_line(&model));
     println!("compute:");
     // Compute runtimes (v0.5.0, issue 29): everything the backend
     // selection depends on, in one place. Each line names the fact
@@ -1589,6 +1593,49 @@ fn restore(session: &str) -> anyhow::Result<()> {
         entry.raw_text.chars().count()
     );
     Ok(())
+}
+
+/// One-line model checksum state for doctor (v0.9.0, issue 45).
+/// Never errors: a broken store degrades to a line, never a crash.
+fn model_checksum_line(model: &str) -> String {
+    use susurro_adapters_stt_local::checksum::{verify_model, VerifyOutcome};
+    let path = std::path::Path::new(model);
+    match susurro_storage::SqliteSettings::open(&db_path()) {
+        Ok(mut store) => match verify_model(path, &mut store) {
+            Ok(VerifyOutcome::Matched(h)) => format!("verified ({})", &h[..16.min(h.len())]),
+            Ok(VerifyOutcome::Recorded(h)) => {
+                format!("recorded trust-on-first-use ({})", &h[..16.min(h.len())])
+            }
+            Ok(VerifyOutcome::Mismatch { .. }) => {
+                "MISMATCH — re-download the model, the file is corrupt or replaced".into()
+            }
+            Err(e) => format!("unverified ({e})"),
+        },
+        Err(e) => format!("unverified (settings store degraded: {e})"),
+    }
+}
+
+/// Verify the whisper model file (v0.9.0, issue 45). Trust on first
+/// use, compare after. Fails the run on missing or mismatched files.
+fn model_check() -> anyhow::Result<()> {
+    use susurro_adapters_stt_local::checksum::{verify_model, VerifyOutcome};
+    let model = resolve_model(&None);
+    let mut store = susurro_storage::SqliteSettings::open(&db_path())
+        .map_err(|e| anyhow::anyhow!("Couldn't open settings: {e}"))?;
+    match verify_model(std::path::Path::new(&model), &mut store) {
+        Ok(VerifyOutcome::Matched(h)) => {
+            println!("model checksum verified: {h}");
+            Ok(())
+        }
+        Ok(VerifyOutcome::Recorded(h)) => {
+            println!("model checksum recorded (trust on first use): {h}");
+            Ok(())
+        }
+        Ok(VerifyOutcome::Mismatch { expected, actual }) => {
+            anyhow::bail!("model checksum MISMATCH: expected {expected}, got {actual}. Re-download the model.")
+        }
+        Err(e) => anyhow::bail!("model checksum unverified: {e}"),
+    }
 }
 
 /// Usage plus latency stats (v0.9.0, issue 43): the user-facing

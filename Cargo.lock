@@ -2262,6 +2262,7 @@ dependencies = [
 name = "susurro-adapters-stt-local"
 version = "0.6.0"
 dependencies = [
+ "sha2",
  "susurro-core",
  "thiserror 2.0.21",
 ]

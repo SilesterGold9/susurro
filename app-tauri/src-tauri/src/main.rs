@@ -289,6 +289,7 @@ fn remove_format_profile(app: String) -> Result<(), String> {
 struct OnboardingStatus {
     model_found: bool,
     model_path: String,
+    model_checksum: String,
     tier: Option<String>,
     hotkey: String,
     onboarding_done: bool,
@@ -301,6 +302,7 @@ fn onboarding_status(state: State<'_, Arc<AppState>>) -> Result<OnboardingStatus
     let settings = state.settings.lock().map_err(|e| e.to_string())?.clone();
     let path = resolve_whisper(&settings.whisper_model);
     let model_found = std::path::Path::new(&path).exists();
+    let model_checksum = checksum_line(&path);
     let tier = susurro_storage::SqliteSettings::open(&shared_db_path())
         .ok()
         .and_then(|s| susurro_adapters_stt_local::bench::load_tier(&s))
@@ -308,10 +310,29 @@ fn onboarding_status(state: State<'_, Arc<AppState>>) -> Result<OnboardingStatus
     Ok(OnboardingStatus {
         model_found,
         model_path: path,
+        model_checksum,
         tier,
         hotkey: settings.hotkey,
         onboarding_done: settings.onboarding_done,
     })
+}
+
+/// One-line checksum state shared by status and download
+/// (v0.9.0, issue 45). Trust on first use, compare after.
+fn checksum_line(path: &str) -> String {
+    use susurro_adapters_stt_local::checksum::{verify_model, VerifyOutcome};
+    let p = std::path::Path::new(path);
+    match susurro_storage::SqliteSettings::open(&shared_db_path()) {
+        Ok(mut store) => match verify_model(p, &mut store) {
+            Ok(VerifyOutcome::Matched(h)) => format!("verified {}", &h[..16.min(h.len())]),
+            Ok(VerifyOutcome::Recorded(h)) => {
+                format!("recorded {}", &h[..16.min(h.len())])
+            }
+            Ok(VerifyOutcome::Mismatch { .. }) => "MISMATCH re-download".into(),
+            Err(e) => format!("unverified ({e})"),
+        },
+        Err(e) => format!("unverified ({e})"),
+    }
 }
 
 /// Download base.en from the whisper.cpp release mirror into the
@@ -345,6 +366,12 @@ fn download_model(app: AppHandle) -> Result<String, String> {
         return Err("model download failed. Check the network and retry.".into());
     }
     std::fs::rename(&tmp, &dest).map_err(|e| e.to_string())?;
+    // Trust on first use starts at download: the fresh bytes are the
+    // reference every later run compares against.
+    if let Ok(mut store) = susurro_storage::SqliteSettings::open(&shared_db_path()) {
+        use susurro_adapters_stt_local::checksum::verify_model;
+        let _ = verify_model(&dest, &mut store);
+    }
     let _ = app.emit(
         "susurro://onboarding",
         serde_json::json!({ "step": "model", "state": "done" }),

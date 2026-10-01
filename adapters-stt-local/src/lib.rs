@@ -25,6 +25,7 @@ use susurro_core::ports::{SpeechToTextPort, Transcript};
 use susurro_core::CoreError;
 
 pub mod bench;
+pub mod checksum;
 pub mod openvino;
 pub mod stt_bench;
 
