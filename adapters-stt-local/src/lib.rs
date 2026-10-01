@@ -20,7 +20,6 @@
 //!   tier; later runs reuse it.
 
 use std::path::PathBuf;
-use std::process::Command;
 use susurro_core::ports::{SpeechToTextPort, Transcript};
 use susurro_core::CoreError;
 
@@ -99,8 +98,8 @@ impl WhisperLocal {
     /// stdout empty. --no-prints + -nt keeps stdout to transcript only.
     /// The OpenVINO flag is present only for that backend; CPU runs
     /// byte-identical to before.
-    fn command(&self, wav_path: &std::path::Path) -> Command {
-        let mut cmd = Command::new(&self.binary);
+    fn command(&self, wav_path: &std::path::Path) -> std::process::Command {
+        let mut cmd = susurro_core::silent_command(&self.binary);
         cmd.arg("-m")
             .arg(&self.model_path)
             .arg("-f")

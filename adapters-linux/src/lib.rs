@@ -84,7 +84,7 @@ impl Default for LinuxPasteInjector {
 /// Linux-only helper: the whole wtype path is compiled out elsewhere.
 #[cfg(target_os = "linux")]
 fn wtype_command(text: &str) -> std::process::Command {
-    let mut cmd = std::process::Command::new("wtype");
+    let mut cmd = susurro_core::silent_command("wtype");
     cmd.arg("--").arg(text);
     cmd
 }
@@ -115,7 +115,7 @@ fn try_wtype(text: &str) -> WtypeOutcome {
 /// BackSpace to delete the selection. Argv carries no shell.
 #[cfg(target_os = "linux")]
 fn wtype_remove_command(text: &str) -> std::process::Command {
-    let mut cmd = std::process::Command::new("wtype");
+    let mut cmd = susurro_core::silent_command("wtype");
     cmd.arg("-M").arg("shift");
     for _ in text.chars() {
         cmd.arg("-k").arg("Left");
@@ -327,7 +327,7 @@ pub fn focused_app() -> Option<String> {
     }
     #[cfg(target_os = "linux")]
     {
-        let out = std::process::Command::new("hyprctl")
+        let out = susurro_core::silent_command("hyprctl")
             .args(["activewindow", "-j"])
             .output()
             .ok()?;

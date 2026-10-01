@@ -161,7 +161,7 @@ fn play_pcm(pcm: &[i16]) {
         ),
         ("aplay", vec!["-r", "16000", "-f", "S16_LE", "-c", "1"]),
     ] {
-        let mut child = match std::process::Command::new(bin)
+        let mut child = match susurro_core::silent_command(bin)
             .args(&args)
             .stdin(std::process::Stdio::piped())
             .stdout(std::process::Stdio::null())
@@ -944,7 +944,7 @@ fn record_via_pipewire(seconds: u64, target: Option<&str>) -> Result<Vec<i16>, C
 }
 
 fn tool_exists(bin: &str) -> bool {
-    std::process::Command::new("which")
+    susurro_core::silent_command("which")
         .arg(bin)
         .output()
         .map(|o| o.status.success())
@@ -954,7 +954,7 @@ fn tool_exists(bin: &str) -> bool {
 /// `timeout N pw-record --rate 16000 --channels 1 --format s16 -`
 /// streams raw s16le mono to stdout for N seconds.
 fn pw_record_command(seconds: u64, target: Option<&str>) -> std::process::Command {
-    let mut cmd = std::process::Command::new("timeout");
+    let mut cmd = susurro_core::silent_command("timeout");
     cmd.arg(seconds.to_string());
     cmd.arg("pw-record");
     cmd.arg("--rate").arg("16000");
@@ -988,7 +988,7 @@ fn record_via_pw_record(seconds: u64, target: Option<&str>) -> Result<Vec<i16>, 
 }
 
 fn record_via_parecord(seconds: u64) -> Result<Vec<i16>, CoreError> {
-    let out = std::process::Command::new("timeout")
+    let out = susurro_core::silent_command("timeout")
         .arg(seconds.to_string())
         .arg("parecord")
         .arg("--rate=16000")

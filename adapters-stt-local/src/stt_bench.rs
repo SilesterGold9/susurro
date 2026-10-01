@@ -38,7 +38,7 @@ pub enum CandidateStatus {
 /// itself does not exist yet, so the bench reports the cell without
 /// timing it.
 pub fn detect_onnx() -> CandidateStatus {
-    let runtime = std::process::Command::new("ldconfig")
+    let runtime = susurro_core::silent_command("ldconfig")
         .arg("-p")
         .output()
         .map(|o| String::from_utf8_lossy(&o.stdout).into_owned())

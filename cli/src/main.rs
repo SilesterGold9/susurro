@@ -81,6 +81,11 @@ enum Cmd {
     Daemon {
         #[arg(long, default_value = "/tmp/susurro.sock")]
         socket: String,
+        /// Hotkey choice for the daemon loop: super_shift_r,
+        /// ctrl_shift_r, or shift_d. Linux listens on the socket
+        /// instead; Windows registers this combo.
+        #[arg(long, default_value = "super_shift_r")]
+        hotkey: String,
         #[arg(long, default_value_t = 30)]
         seconds: u64,
         #[arg(long)]
@@ -241,6 +246,7 @@ fn main() -> anyhow::Result<()> {
         }),
         Cmd::Daemon {
             socket,
+            hotkey,
             seconds,
             model,
             mock,
@@ -256,6 +262,7 @@ fn main() -> anyhow::Result<()> {
             turbo,
         } => daemon(
             &socket,
+            &hotkey,
             &ListenOpts {
                 seconds,
                 model,
@@ -499,7 +506,7 @@ fn parse_whisper_version(output: &str) -> Option<String> {
 /// Best-effort `whisper-cli --version` probe. None when the binary is
 /// missing or its output carries no version token.
 fn whisper_cli_version() -> Option<String> {
-    let out = std::process::Command::new("whisper-cli")
+    let out = susurro_core::silent_command("whisper-cli")
         .arg("--version")
         .output()
         .ok()?;
@@ -606,16 +613,28 @@ fn doctor() -> anyhow::Result<()> {
         println!("audio server: {server} — install pw-record or parecord for device routing");
     }
     println!("tools:");
+    // Cross-platform first, OS extras after: probing Linux-only
+    // tools on Windows is noise, not diagnosis.
+    for tool in ["whisper-cli", "curl", "ollama"] {
+        let found = which(tool);
+        println!(
+            "{}: {}",
+            tool,
+            if found {
+                "found"
+            } else {
+                "missing — see README"
+            }
+        );
+    }
+    #[cfg(target_os = "linux")]
     for tool in [
         "pw-record",
         "parecord",
         "wl-copy",
         "wtype",
         "ydotool",
-        "whisper-cli",
         "socat",
-        "ollama",
-        "curl",
         "paplay",
     ] {
         let found = which(tool);
@@ -629,6 +648,8 @@ fn doctor() -> anyhow::Result<()> {
             }
         );
     }
+    #[cfg(target_os = "windows")]
+    println!("paste: SendInput direct-type (no external tools needed)");
     match whisper_cli_version() {
         Some(v) => println!("whisper-cli version: {v}"),
         None => {
@@ -753,7 +774,7 @@ fn doctor() -> anyhow::Result<()> {
     }
     println!("cloud keys:");
     // Best-effort Ollama server + model probe for --cleanup ollama.
-    match std::process::Command::new("curl")
+    match susurro_core::silent_command("curl")
         .args(["-sS", "-m", "5", "http://localhost:11434/api/tags"])
         .output()
     {
@@ -873,7 +894,7 @@ fn doctor() -> anyhow::Result<()> {
     // path without downloading anything.
     println!("updates:");
     println!("channel: stable (beta tags publish as prereleases)");
-    match std::process::Command::new("curl")
+    match susurro_core::silent_command("curl")
         .args([
             "-sSL",
             "-m",
@@ -911,7 +932,7 @@ fn which(bin: &str) -> bool {
     let probe = "where";
     #[cfg(not(target_os = "windows"))]
     let probe = "which";
-    std::process::Command::new(probe)
+    susurro_core::silent_command(probe)
         .arg(bin)
         .output()
         .map(|o| o.status.success())
@@ -1879,8 +1900,9 @@ fn hyprland_bind_line(hotkey: &str, socket: &str) -> String {
     format!("bind = {combo}, exec, echo toggle | socat - UNIX-CONNECT:{socket}")
 }
 
-/// Focused app for privacy routing: explicit --app wins, else Hyprland
-/// auto-detect on Linux. None means unknown, which never matches.
+/// Focused app for privacy routing: explicit --app wins, else
+/// Hyprland auto-detect on Linux and foreground window on Windows.
+/// None means unknown, which never matches.
 fn resolve_focused_app(explicit: Option<&str>) -> Option<String> {
     if let Some(app) = explicit {
         let trimmed = app.trim();
@@ -1892,7 +1914,11 @@ fn resolve_focused_app(explicit: Option<&str>) -> Option<String> {
     {
         susurro_adapters_linux::focused_app()
     }
-    #[cfg(not(target_os = "linux"))]
+    #[cfg(target_os = "windows")]
+    {
+        susurro_adapters_windows::focused_app()
+    }
+    #[cfg(not(any(target_os = "linux", target_os = "windows")))]
     {
         None
     }
@@ -2213,8 +2239,12 @@ fn started_buffer(pcm: Vec<i16>) -> anyhow::Result<susurro_adapters_audio::MockC
     Ok(buffered)
 }
 
-fn daemon(_socket_path: &str, opts: &ListenOpts) -> anyhow::Result<()> {
+fn daemon(_socket_path: &str, hotkey_name: &str, opts: &ListenOpts) -> anyhow::Result<()> {
     use susurro_core::ports::GlobalHotkeyPort;
+    // The named choice only registers on Windows; Linux listens on
+    // the Hyprland socket instead.
+    #[cfg(not(target_os = "windows"))]
+    let _ = hotkey_name;
     // Hotkey source is platform-owned: Hyprland socket on Linux,
     // RegisterHotKey on Windows. Anything else has no daemon.
     #[cfg(target_os = "linux")]
@@ -2226,8 +2256,9 @@ fn daemon(_socket_path: &str, opts: &ListenOpts) -> anyhow::Result<()> {
     };
     #[cfg(target_os = "windows")]
     let hotkey: Box<dyn GlobalHotkeyPort> = {
-        println!("susurro daemon listening for Win+Shift+R");
-        Box::new(susurro_adapters_windows::WindowsHotkey::with_defaults())
+        let hk = susurro_adapters_windows::hotkey_from_name(hotkey_name);
+        println!("susurro daemon listening for {hotkey_name}");
+        Box::new(hk)
     };
     #[cfg(not(any(target_os = "linux", target_os = "windows")))]
     let hotkey: Box<dyn GlobalHotkeyPort> =

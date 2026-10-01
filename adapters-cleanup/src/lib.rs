@@ -197,7 +197,7 @@ fn request_body(model: &str, prompt: &str) -> String {
 /// `request_body`.
 fn chat_once(endpoint: &str, model: &str, prompt: &str) -> Result<String, String> {
     let body = request_body(model, prompt);
-    let out = std::process::Command::new("curl")
+    let out = susurro_core::silent_command("curl")
         .args([
             "-sS",
             "-m",

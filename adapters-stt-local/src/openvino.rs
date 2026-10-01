@@ -175,7 +175,7 @@ pub fn runtime_roots() -> Vec<std::path::PathBuf> {
 }
 
 fn ldconfig_text() -> String {
-    std::process::Command::new("ldconfig")
+    susurro_core::silent_command("ldconfig")
         .arg("-p")
         .output()
         .map(|o| String::from_utf8_lossy(&o.stdout).into_owned())
@@ -202,7 +202,7 @@ pub fn binary_advertises_ov(binary: &str) -> bool {
             return *hit;
         }
     }
-    let advertised = std::process::Command::new(binary)
+    let advertised = susurro_core::silent_command(binary)
         .arg("--help")
         .output()
         .map(|o| {
