@@ -8,17 +8,48 @@
       html, body { margin: 0; padding: 0; background: #f6f4ed; }
       #boot {
         display: flex;
+        flex-direction: column;
         align-items: center;
         justify-content: center;
+        gap: 14px;
         height: 100vh;
         font: 600 15px Inter, system-ui, sans-serif;
         color: #1b1a17;
-        opacity: 0.7;
+      }
+      #boot .mark { font-size: 20px; font-weight: 800; letter-spacing: -0.3px; }
+      #boot .mark i { font-style: normal; color: #d85a30; animation: pulse 1.6s ease-in-out infinite; }
+      @keyframes pulse { 50% { opacity: 0.35; } }
+      #boot .lines { position: relative; height: 20px; width: 300px; text-align: center; }
+      #boot .lines span {
+        position: absolute;
+        inset: 0;
+        opacity: 0;
+        font-weight: 400;
+        font-size: 13px;
+        animation: line 12s linear infinite;
+      }
+      #boot .lines span:nth-child(2) { animation-delay: 3s; }
+      #boot .lines span:nth-child(3) { animation-delay: 6s; }
+      #boot .lines span:nth-child(4) { animation-delay: 9s; }
+      @keyframes line { 0% { opacity: 0; } 4% { opacity: 0.65; } 21% { opacity: 0.65; } 25%, 100% { opacity: 0; } }
+      @media (prefers-reduced-motion: reduce) {
+        #boot .mark i { animation: none; }
+        #boot .lines span { animation: none; }
+        #boot .lines span:first-child { opacity: 0.65; }
+        #boot .lines span + span { display: none; }
       }
     </style>
   </head>
   <body>
-    <div id="root"><div id="boot">susurro<span style="color:#d85a30">,</span> loading</div></div>
+    <div id="root"><div id="boot">
+      <div class="mark">susurro<i>,</i></div>
+      <div class="lines">
+        <span>warming up the microphone</span>
+        <span>teaching commas some manners</span>
+        <span>stretching the waveform</span>
+        <span>psst: saying scratch that undoes</span>
+      </div>
+    </div></div>
     <script type="module" src="/src/main.tsx"></script>
   </body>
 </html>

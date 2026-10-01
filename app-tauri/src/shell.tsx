@@ -47,7 +47,8 @@ export default function Shell() {
     <div className={`flow${hc ? " high-contrast" : ""}`}>
       <aside className="flow-side">
         <div className="flow-brand" aria-label="susurro,">
-          susurro<span className="comma" aria-hidden="true">,</span>
+          <span className="word">susurro</span>
+          <span className="comma" aria-hidden="true">,</span>
         </div>
         <nav aria-label="primary">
           {NAV.map((n) => (
@@ -60,7 +61,7 @@ export default function Shell() {
               <span className="glyph" aria-hidden="true">
                 {n.glyph}
               </span>
-              {n.label}
+              <span className="label">{n.label}</span>
             </button>
           ))}
         </nav>
@@ -75,7 +76,7 @@ export default function Shell() {
               <span className="glyph" aria-hidden="true">
                 {n.glyph}
               </span>
-              {n.label}
+              <span className="label">{n.label}</span>
             </button>
           ))}
         </div>
