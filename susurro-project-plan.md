@@ -189,21 +189,21 @@ susurro/
 - [ ] Task runner (`just dev`, `just bench`, `just test-contract`, ...)
 
 ### v0.8.0 — UX depth
-- [ ] Semantic "scratch that" undo (last session, not just OS undo)
-- [ ] Per-app formatting profiles
-- [ ] Onboarding flow: model download + benchmark progress clearly communicated
-- [ ] Accessibility pass: remappable hotkeys, contrast, screen-reader settings
+- [x] Semantic "scratch that" undo (last session, not just OS undo)
+- [x] Per-app formatting profiles
+- [x] Onboarding flow: model download + benchmark progress clearly communicated
+- [x] Accessibility pass: remappable hotkeys, contrast, screen-reader settings
 
 ### v0.9.0 — Hardening / release candidate
-- [ ] Full observability: tracing, per-stage P50/P95/P99 latency view
-- [ ] Property-based tests on the state machine (`proptest`), fuzz tests on injection
-- [ ] Model checksum verification, atomic config/model file writes
-- [ ] Optional "turbo mode": speculative race between cloud and local, first response wins
+- [x] Full observability: tracing, per-stage P50/P95/P99 latency view
+- [x] Property-based tests on the state machine (`proptest`), fuzz tests on injection
+- [x] Model checksum verification, atomic config/model file writes
+- [x] Optional "turbo mode": speculative race between cloud and local, first response wins
 
 ### v1.0.0 — Susurro launch
-- [ ] Cross-platform installers (AppImage/.deb + MSI)
-- [ ] Promote the beta channel to stable; finalize signing-key rotation policy
-- [ ] Public repo, README, CONTRIBUTING
+- [x] Cross-platform installers (AppImage/.deb + MSI)
+- [x] Promote the beta channel to stable; finalize signing-key rotation policy
+- [x] Public repo, README, CONTRIBUTING
 
 ### Beyond v1.0 (stretch)
 - [ ] GPU backend (CUDA/Vulkan) activated automatically when a discrete card is present

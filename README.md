@@ -6,96 +6,84 @@
 
 Offline-first voice dictation for Linux (Hyprland) + Windows. Local STT by default, optional free-tier cloud (Groq, NVIDIA NIM) when online.
 
-See `susurro-project-plan.md` for the full plan. This repo starts at **v0.0.1 — Hello, voice**.
-
-## v0.0.1 scope
-
-- Hyprland keybind triggers a socket call into the app
-- Record audio, run `whisper.cpp` `base.en` on CPU
-- Raw clipboard paste, no cleanup
-- No UI, no persistence — prove capture-to-injection end to end
-- `ci.yml` + `release.yml` skeletons from the first commit
-
-## Quick start
-
-```sh
-cargo test
-cargo run -p susurro-cli -- doctor
-cargo run -p susurro-cli -- listen-once
-cargo run -p susurro-cli -- listen --mock --stdout
-cargo run -p susurro-cli -- hyprland-bind
-```
-
-Set `SUSURRO_MODEL` to your `base.en` model path. Install `wl-clipboard`, `ydotool` (+ `ydotoold` running), `whisper-cli`, `socat` for the real loop.
-
-## Task runner (`just`)
-
-```sh
-just dev            # mock listen loop, hardware-free
-just bench          # CPU tier benchmark
-just test-contract  # cargo test --workspace (includes contracts/)
-just lint           # fmt check + clippy -D warnings (same as CI)
-just doctor         # susurro doctor
-```
-
-Recipes are thin wrappers over the cargo commands above. Install with `cargo install just`.
-
-## Install (v0.1.0+)
+## Install
 
 Prebuilt bundles on the [releases page](https://github.com/SilesterGold9/susurro/releases):
-AppImage / .deb (Linux), NSIS setup (Windows), plus standalone `susurro` CLI binaries.
+AppImage / .deb (Linux), MSI plus NSIS setup (Windows), plus standalone `susurro` CLI binaries. Every asset ships with a `.sig` file and `latest.json` powers the in-app updater.
 
 ```sh
 # Linux quick start
-./Susurro_0.3.0_amd64.AppImage
+./Susurro_<version>_amd64.AppImage
 ```
 
-The AppImage needs whisper.cpp (`whisper-cli`), a whisper model, and (for
+The app needs whisper.cpp (`whisper-cli`), a whisper model, and (for
 paste) `wl-copy` + `ydotool`/`ydotoold` — see `susurro doctor`.
-In-app updates check `latest.json` on the releases page and surface a
-quiet indicator in settings (never a forced modal).
+In-app updates check `latest.json` and surface a quiet indicator in
+settings (never a forced modal). First run walks through four setup
+screens: model download, hotkey pick, test dictation, done.
 
-## v0.0.1 end-to-end (Linux/Hyprland, CLI)
+## Model
 
-1. Download the model:
-   ```sh
-   mkdir -p ~/.local/share/susurro/models
-   # from https://huggingface.co/ggerganov/whisper.cpp — ggml base.en
-   # place as ~/.local/share/susurro/models/base.en.bin
-   # or: export SUSURRO_MODEL=/path/to/base.en.bin
-   ```
-2. Install tools: `wl-clipboard`, `ydotool` (run `ydotoold`), `whisper-cli`, `socat`.
-3. Check: `cargo run -p susurro-cli -- doctor` — mic, tools, and model should read "found".
-4. One-shot real run: `cargo run -p susurro-cli -- listen --seconds 6`
-   Records 6s from the default mic, transcribes with base.en, pastes via wl-copy + ydotool.
-   Use `--stdout` to print instead of pasting, `--mock` to skip hardware.
-5. Hotkey loop:
-   ```sh
-   cargo run -p susurro-cli -- hyprland-bind  # add the bind to hyprland.conf
-   cargo run -p susurro-cli -- daemon
-   ```
-   Press SUPER_SHIFT+R, speak, and the transcript is pasted at the cursor.
-   `cli/tests/e2e_mock.rs` proves the same loop hardware-free in CI.
-   The `hyprland-bind` output also prints the pill overlay rule block
-   (float, fixed size, bottom-center move, no border, shadow, blur, or
-   focus). The compositor owns placement on Wayland, so the rule block
-   in `windowrules.conf` is what docks the pill, not client positioning.
+```sh
+mkdir -p ~/.local/share/susurro/models
+# from https://huggingface.co/ggerganov/whisper.cpp — ggml base.en
+# place as ~/.local/share/susurro/models/base.en.bin
+# or: export SUSURRO_MODEL=/path/to/base.en.bin
+```
+
+`susurro model-check` verifies the model checksum (trust on first
+use, compare after). `susurro bench` picks the model tier for the
+machine; `susurro doctor` reports mic, tools, model, keys, and
+updater reachability.
+
+## CLI
+
+```sh
+cargo run -p susurro-cli -- doctor
+cargo run -p susurro-cli -- listen --mock --stdout
+cargo run -p susurro-cli -- listen --seconds 6
+cargo run -p susurro-cli -- hyprland-bind  # add the bind to hyprland.conf
+cargo run -p susurro-cli -- daemon        # hotkey loop: press SUPER_SHIFT+R, speak
+```
+
+| Command | What it does |
+|---|---|
+| `doctor` | Diagnose audio, tools, model, keys, updates |
+| `listen`, `daemon` | Dictate once / on every hotkey (`--turbo` races cloud vs local) |
+| `listen-once` | One mock utterance end to end, hardware-free |
+| `hyprland-bind` | Bind snippet for the hotkey socket |
+| `history`, `stats` | Transcript history / usage plus latency percentiles |
+| `undo`, `restore` | Remove last injection / re-inject the raw transcript |
+| `dict-add`, `dict-remove`, `dict-list` | Custom vocabulary boost |
+| `key-set`, `key-clear` | Cloud API keys in the OS keyring, never plaintext |
+| `privacy-add`, `privacy-remove`, `privacy-list` | Per-app local-only routing |
+| `profile-add`, `profile-remove`, `profile-list` | Per-app tone: formal, casual, verbatim |
+| `bench`, `stt-bench` | CPU tier benchmark / backend race with persisted winner |
+| `model-check` | Verify the model checksum |
+| `replay` | Session event log replay for debugging |
+
+Saying exactly "scratch that" undoes the last session hands-free.
+`susurro stats` shows per-day words, streak, top apps, dictionary
+hits, and end-to-end p50/p95/p99.
 
 ## Workspace
 
 - `core/` — state machine, pipeline, port traits. No platform imports.
-- `adapters-audio/` — cpal 16kHz mono capture + mock
-- `adapters-stt-local/` — whisper.cpp via binary (+ OpenVINO iGPU encoder offload where present) + mock
-- `adapters-stt-cloud/` — stub until v0.3.0
-- `adapters-cleanup/` — passthrough until v0.1.0
-- `adapters-linux/` — Hyprland socket + wl-copy/ydotool paste
-- `adapters-windows/` — RegisterHotKey hotkey + SendInput unicode paste
-- `storage/` — in-memory stubs until v0.2.0 SQLite
-- `cli/` — `susurro doctor`, `listen`, `daemon`, `listen-once`, `hyprland-bind`, `bench`, `stt-bench`, `replay`, `undo`
-- `contracts/` — port contract suite every adapter must pass (v0.7.0)
-- `app-tauri/` — UI lands in v0.1.0, placeholder only
-- `.github/workflows/` — CI + release skeletons
+- `adapters-audio/` — cpal/PipeWire capture, VAD, earcons, mocks
+- `adapters-stt-local/` — whisper.cpp binary, OpenVINO offload, bench, checksum, mocks
+- `adapters-stt-cloud/` — OpenAI-compatible STT, fallback chain, turbo race
+- `adapters-cleanup/` — passthrough, regex, Ollama with fail-open
+- `adapters-linux/` — Hyprland socket, wl-copy/ydotool paste
+- `adapters-windows/` — RegisterHotKey, SendInput paste
+- `storage/` — SQLite history, tickets, dictionary, profiles, settings
+- `contracts/` — port contract suite every adapter must pass
+- `cli/` — the table above
+- `app-tauri/` — pill overlay, settings, onboarding, tray, updater
+- `docs/` — ADRs, [signing and rotation policy](docs/signing-rotation.md)
+- `.github/workflows/` — CI (Ubuntu + Windows) plus signed releases
 
-## Conventional commits
+## Contributing
 
-This repo uses conventional commits for versioning (`release-plz` / `git-cliff` in later milestones). Write commits like `feat(core): ...`, `fix(linux): ...`.
+See [CONTRIBUTING.md](CONTRIBUTING.md). Prove every change with the
+recipe there: fmt, clippy, workspace tests, doctor, mock listen.
+Conventional commits, one concern per commit.
