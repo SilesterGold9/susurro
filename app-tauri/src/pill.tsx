@@ -129,6 +129,7 @@ export default function Pill() {
   const [settleKey, setSettleKey] = useState(0);
   const [contextApp, setContextApp] = useState<string | null>(null);
   const [elapsed, setElapsed] = useState(0);
+  const [highContrast, setHighContrast] = useState(false);
   const stateRef = useRef<PillState>("idle");
   const startedAt = useRef(0);
   const timerId = useRef<number>(0);
@@ -143,6 +144,9 @@ export default function Pill() {
   const canvasRef = useRef<HTMLCanvasElement>(null);
 
   useEffect(() => {
+    invoke<{ high_contrast: boolean }>("get_settings")
+      .then((s) => setHighContrast(!!s?.high_contrast))
+      .catch(() => {});
     const offs = [
       listen<string>("susurro://state", (e) => {
         const next = e.payload as PillState;
@@ -501,7 +505,7 @@ export default function Pill() {
   }
 
   return (
-    <div className="pill-wrap">
+    <div className={`pill-wrap${highContrast ? " high-contrast" : ""}`}>
       <div
         className={`pill state-${state}${state === "done" ? " settle" : ""}`}
         key={settleKey}

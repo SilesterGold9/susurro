@@ -28,10 +28,18 @@ struct Settings {
     hotkey: String,
     #[serde(default)]
     onboarding_done: bool,
+    #[serde(default)]
+    high_contrast: bool,
+    #[serde(default = "default_announce")]
+    announce: bool,
 }
 
 fn default_hotkey() -> String {
     "super_shift_r".into()
+}
+
+fn default_announce() -> bool {
+    true
 }
 
 impl Default for Settings {
@@ -48,6 +56,8 @@ impl Default for Settings {
             update_channel: "stable".into(),
             hotkey: default_hotkey(),
             onboarding_done: false,
+            high_contrast: false,
+            announce: default_announce(),
         }
     }
 }
@@ -294,13 +304,7 @@ fn download_model(app: AppHandle) -> Result<String, String> {
         serde_json::json!({ "step": "model", "state": "downloading" }),
     );
     let status = std::process::Command::new("curl")
-        .args([
-            "-sSL",
-            "--fail",
-            MODEL_URL,
-            "-o",
-            &tmp.to_string_lossy(),
-        ])
+        .args(["-sSL", "--fail", MODEL_URL, "-o", &tmp.to_string_lossy()])
         .status()
         .map_err(|e| format!("Couldn't run curl (is curl installed?): {e}"))?;
     if !status.success() {
@@ -343,7 +347,10 @@ fn run_bench() -> Result<serde_json::Value, String> {
 /// Short test dictation for onboarding screen three: six seconds,
 /// then the transcript shows in the window.
 #[tauri::command]
-fn test_dictation(app: AppHandle, state: State<'_, Arc<AppState>>) -> Result<UtteranceResult, String> {
+fn test_dictation(
+    app: AppHandle,
+    state: State<'_, Arc<AppState>>,
+) -> Result<UtteranceResult, String> {
     let mut settings = state.settings.lock().map_err(|e| e.to_string())?.clone();
     settings.seconds = 6;
     let tickets = TicketRegistry::new();
@@ -365,10 +372,7 @@ fn hotkey_snippet(hotkey: String) -> String {
 /// Finish onboarding: store the hotkey choice and close the flow.
 /// First run never returns after this; settings opens instead.
 #[tauri::command]
-fn finish_onboarding(
-    hotkey: String,
-    state: State<'_, Arc<AppState>>,
-) -> Result<(), String> {
+fn finish_onboarding(hotkey: String, state: State<'_, Arc<AppState>>) -> Result<(), String> {
     let hotkey = match hotkey.trim().to_lowercase().as_str() {
         "ctrl_shift_r" | "shift_d" => hotkey.trim().to_lowercase(),
         _ => default_hotkey(),
@@ -925,39 +929,39 @@ fn start_dictation(
     run_dictation(&app, &settings, &tickets)
 }
 
-/// Background hotkey listener: each press dictates. The source is
-/// platform-owned: Hyprland socket on Linux, RegisterHotKey on
-/// Windows. Anything else sleeps instead of spinning.
+/// Background hotkey listener: each press dictates. The hotkey is
+/// rebuilt every press from settings, so a remap applies without a
+/// restart. Anything else sleeps instead of spinning.
 fn spawn_hotkey_listener(app: AppHandle, state: Arc<AppState>) {
     use susurro_core::ports::GlobalHotkeyPort;
     std::thread::spawn(move || {
-        #[cfg(target_os = "linux")]
-        let hotkey: Box<dyn GlobalHotkeyPort> = {
-            let socket_path = state
-                .settings
-                .lock()
-                .map(|s| s.socket_path.clone())
-                .unwrap_or_else(|_| "/tmp/susurro.sock".into());
-            Box::new(susurro_adapters_linux::HyprlandSocket::new(&socket_path))
-        };
-        #[cfg(target_os = "windows")]
-        let hotkey: Box<dyn GlobalHotkeyPort> = {
-            let name = state
-                .settings
-                .lock()
-                .map(|s| s.hotkey.clone())
-                .unwrap_or_else(|_| default_hotkey());
-            Box::new(susurro_adapters_windows::hotkey_from_name(&name))
-        };
-        #[cfg(not(any(target_os = "linux", target_os = "windows")))]
-        let hotkey: Box<dyn GlobalHotkeyPort> = {
-            // No listener here: sleep forever instead of hot-spinning.
-            loop {
-                std::thread::sleep(std::time::Duration::from_secs(3600));
-            }
-        };
         let tickets = TicketRegistry::new();
         loop {
+            #[cfg(target_os = "linux")]
+            let hotkey: Box<dyn GlobalHotkeyPort> = {
+                let socket_path = state
+                    .settings
+                    .lock()
+                    .map(|s| s.socket_path.clone())
+                    .unwrap_or_else(|_| "/tmp/susurro.sock".into());
+                Box::new(susurro_adapters_linux::HyprlandSocket::new(&socket_path))
+            };
+            #[cfg(target_os = "windows")]
+            let hotkey: Box<dyn GlobalHotkeyPort> = {
+                let name = state
+                    .settings
+                    .lock()
+                    .map(|s| s.hotkey.clone())
+                    .unwrap_or_else(|_| default_hotkey());
+                Box::new(susurro_adapters_windows::hotkey_from_name(&name))
+            };
+            #[cfg(not(any(target_os = "linux", target_os = "windows")))]
+            let hotkey: Box<dyn GlobalHotkeyPort> = {
+                // No listener here: sleep forever instead of hot-spinning.
+                loop {
+                    std::thread::sleep(std::time::Duration::from_secs(3600));
+                }
+            };
             if hotkey.wait_for_hotkey().is_err() {
                 std::thread::sleep(std::time::Duration::from_secs(1));
                 continue;
@@ -1066,4 +1070,39 @@ fn main() {
         })
         .run(tauri::generate_context!())
         .expect("susurro failed to start");
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn accessibility_defaults_are_sane() {
+        let s = Settings::default();
+        assert_eq!(s.hotkey, "super_shift_r");
+        assert!(!s.high_contrast);
+        assert!(s.announce);
+        assert!(!s.onboarding_done);
+    }
+
+    #[test]
+    fn old_settings_files_migrate_forward() {
+        // Pre-accessibility files lack the new keys: they parse with
+        // defaults instead of failing the load.
+        let s: Settings = serde_json::from_str(r#"{"seconds":30}"#).unwrap();
+        assert_eq!(s.hotkey, "super_shift_r");
+        assert!(!s.high_contrast);
+        assert!(s.announce);
+        // Full roundtrip keeps explicit choices.
+        let full = Settings {
+            high_contrast: true,
+            announce: false,
+            hotkey: "shift_d".into(),
+            ..Settings::default()
+        };
+        let back: Settings = serde_json::from_str(&serde_json::to_string(&full).unwrap()).unwrap();
+        assert!(back.high_contrast);
+        assert!(!back.announce);
+        assert_eq!(back.hotkey, "shift_d");
+    }
 }

@@ -1,6 +1,7 @@
 import { useEffect, useState } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import { getCurrentWindow } from "@tauri-apps/api/window";
+import type { Settings } from "./settings";
 
 interface OnboardingStatus {
   model_found: boolean;
@@ -39,6 +40,7 @@ export default function OnboardingView() {
   const [testOut, setTestOut] = useState<TestResult | null>(null);
   const [busy, setBusy] = useState("");
   const [note, setNote] = useState("");
+  const [display, setDisplay] = useState({ high_contrast: false, announce: true });
 
   async function refresh() {
     try {
@@ -48,6 +50,10 @@ export default function OnboardingView() {
     } catch (e) {
       setNote(`Couldn't read setup state. ${e}`);
     }
+    try {
+      const prefs = await invoke<Settings>("get_settings");
+      setDisplay({ high_contrast: prefs.high_contrast, announce: prefs.announce });
+    } catch {}
   }
 
   useEffect(() => {
@@ -107,7 +113,7 @@ export default function OnboardingView() {
   }
 
   return (
-    <div className="settings">
+    <div className={`settings${display.high_contrast ? " high-contrast" : ""}`}>
       <h1 className="brand-wordmark" aria-label="susurro,">
         susurro<span className="comma" aria-hidden="true">,</span>
       </h1>
@@ -231,7 +237,7 @@ export default function OnboardingView() {
         </div>
       )}
 
-      {note && <div className="update-note">{note}</div>}
+      {note && <div className="update-note" aria-live={display.announce ? "polite" : "off"}>{note}</div>}
     </div>
   );
 }

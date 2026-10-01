@@ -298,3 +298,46 @@ button.ghost {
   background: #8883;
 }
 .badge.local { background: #0f6e5633; color: var(--teal); }
+/* Keyboard users: every control shows where focus sits. */
+:focus-visible {
+  outline: 2px solid var(--teal);
+  outline-offset: 2px;
+}
+/* High contrast (v0.8.0, issue 42): pure surfaces, hard borders,
+   no translucency. Honors the OS light/dark pick underneath. */
+.high-contrast {
+  --bg-dark: #000;
+  --surface-dark: #000;
+  --text-dark: #fff;
+  --bg-light: #fff;
+  --surface-light: #fff;
+  --text-light: #000;
+  --teal: #007a52;
+  --coral: #c22e00;
+}
+.high-contrast .pill {
+  border: 2px solid currentColor;
+  box-shadow: none;
+}
+.high-contrast .field input,
+.high-contrast .field select,
+.high-contrast button.ghost {
+  border: 2px solid currentColor;
+}
+.high-contrast button.primary {
+  background: #000;
+  color: #fff;
+  border: 2px solid #fff;
+  outline: 2px solid #000;
+}
+@media (prefers-color-scheme: light) {
+  .high-contrast button.primary {
+    background: #000;
+    color: #fff;
+    border-color: #000;
+    outline-color: #fff;
+  }
+}
+.high-contrast :focus-visible {
+  outline-width: 3px;
+}

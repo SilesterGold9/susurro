@@ -12,6 +12,10 @@ export interface Settings {
   device: string;
   socket_path: string;
   update_channel: string;
+  hotkey: string;
+  onboarding_done: boolean;
+  high_contrast: boolean;
+  announce: boolean;
 }
 
 const DEFAULTS: Settings = {
@@ -24,6 +28,10 @@ const DEFAULTS: Settings = {
   device: "",
   socket_path: "/tmp/susurro.sock",
   update_channel: "stable",
+  hotkey: "super_shift_r",
+  onboarding_done: false,
+  high_contrast: false,
+  announce: true,
 };
 
 export interface HistoryRow {
@@ -135,8 +143,10 @@ export default function SettingsView() {
     setS({ ...s, [k]: v });
   }
 
+  const live = s.announce ? "polite" : "off";
+
   return (
-    <div className="settings">
+    <div className={`settings${s.high_contrast ? " high-contrast" : ""}`}>
       {/* Split keeps the coral comma styled while screen readers
           announce susurro with its comma exactly once. */}
       <h1 className="brand-wordmark" aria-label="susurro,">
@@ -233,7 +243,7 @@ export default function SettingsView() {
           </button>
         </div>
       </div>
-      {profileNote && <div className="update-note">{profileNote}</div>}
+      {profileNote && <div className="update-note" aria-live={live}>{profileNote}</div>}
       {profiles.length > 0 && (
         <div className="history">
           {profiles.map((p) => (
@@ -266,7 +276,7 @@ export default function SettingsView() {
           run doctor
         </button>
       </div>
-      <div className="update-note">{updateNote}</div>
+      <div className="update-note" aria-live={live}>{updateNote}</div>
       {doctor && (
         <div className="history">
           <pre className="mono" style={{ whiteSpace: "pre-wrap" }}>
@@ -276,6 +286,41 @@ export default function SettingsView() {
       )}
 
       <div className="field">
+        <label>Reading the screen</label>
+        <div className="sub">The hotkey remaps live. Contrast and announcements apply on save.</div>
+        <div className="field">
+          <label>Dictation hotkey</label>
+          <select
+            value={s.hotkey}
+            onChange={(e) => set("hotkey", e.target.value)}
+            aria-label="dictation hotkey"
+          >
+            <option value="super_shift_r">Super + Shift + R</option>
+            <option value="ctrl_shift_r">Ctrl + Shift + R</option>
+            <option value="shift_d">Shift + D</option>
+          </select>
+        </div>
+        <div className="field row">
+          <input
+            type="checkbox"
+            checked={s.high_contrast}
+            onChange={(e) => set("high_contrast", e.target.checked)}
+            aria-label="high contrast"
+          />
+          <span>High contrast</span>
+        </div>
+        <div className="field row">
+          <input
+            type="checkbox"
+            checked={s.announce}
+            onChange={(e) => set("announce", e.target.checked)}
+            aria-label="screen reader announcements"
+          />
+          <span>Screen reader announcements</span>
+        </div>
+      </div>
+
+      <div className="field">
         <label>History (raw beside cleaned)</label>
         <div className="row">
           <button className="ghost" onClick={loadHistory} aria-label="load history">
@@ -283,7 +328,7 @@ export default function SettingsView() {
           </button>
         </div>
       </div>
-      {historyNote && <div className="update-note">{historyNote}</div>}
+      {historyNote && <div className="update-note" aria-live={live}>{historyNote}</div>}
       {history.length > 0 && (
         <div className="history">
           {history.map((h) => {
