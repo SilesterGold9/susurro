@@ -14,7 +14,7 @@
       {
         "label": "pill",
         "title": "Susurro",
-        "url": "/",
+        "url": "/#pill",
         "width": 360,
         "height": 64,
         "center": false,
@@ -30,15 +30,15 @@
       {
         "label": "settings",
         "title": "Susurro",
-        "url": "/",
+        "url": "/#app",
         "width": 1120,
         "height": 760,
-        "visible": false
+        "visible": true
       },
       {
         "label": "onboarding",
         "title": "Susurro setup",
-        "url": "/",
+        "url": "/#onboarding",
         "width": 480,
         "height": 560,
         "visible": false

@@ -7,30 +7,40 @@ import Shell from "./shell";
 import { ErrorBoundary } from "./errorbound";
 import "./styles.css";
 
+function route(): string {
+  // Hash first: it needs no API call, so the branch is right even
+  // when the window metadata cannot be read.
+  const hash = window.location.hash.replace(/^#\/?/, "");
+  if (hash === "pill" || hash === "onboarding" || hash === "app") {
+    return hash;
+  }
+  try {
+    const label = getCurrentWindow().label;
+    if (label === "pill" || label === "onboarding") return label;
+  } catch (e) {
+    console.error("window identity unreadable, showing app", e);
+  }
+  // Unknown windows show the app, never the pill: a wrong shell is
+  // debuggable, a wrong pill is a dead app.
+  return "app";
+}
+
 function App() {
-  const [label, setLabel] = React.useState("pill");
-  React.useEffect(() => {
-    try {
-      const w = getCurrentWindow();
-      setLabel(w.label);
-    } catch (e) {
-      console.error("window label unreadable, falling back to pill", e);
-    }
-  }, []);
-  if (label === "pill")
+  const [routeName] = React.useState(route);
+  if (routeName === "pill")
     return (
-      <ErrorBoundary label={label}>
+      <ErrorBoundary label={routeName}>
         <Pill />
       </ErrorBoundary>
     );
-  if (label === "onboarding")
+  if (routeName === "onboarding")
     return (
-      <ErrorBoundary label={label}>
+      <ErrorBoundary label={routeName}>
         <OnboardingView />
       </ErrorBoundary>
     );
   return (
-    <ErrorBoundary label={label}>
+    <ErrorBoundary label={routeName}>
       <Shell />
     </ErrorBoundary>
   );
