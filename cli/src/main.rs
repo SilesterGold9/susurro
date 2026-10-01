@@ -868,6 +868,39 @@ fn doctor() -> anyhow::Result<()> {
             "clipboard paste (wl-copy plus ydotool)"
         }
     );
+    // Updates (v1.0.0, issue 48): stable is the default channel, beta
+    // tags publish as prereleases. Reachability proves the updater
+    // path without downloading anything.
+    println!("updates:");
+    println!("channel: stable (beta tags publish as prereleases)");
+    match std::process::Command::new("curl")
+        .args([
+            "-sSL",
+            "-m",
+            "8",
+            "-o",
+            "/dev/null",
+            "-w",
+            "%{http_code}",
+            "https://github.com/SilesterGold9/susurro/releases/latest/download/latest.json",
+        ])
+        .output()
+    {
+        Ok(o) if o.status.success() => {
+            let code = String::from_utf8_lossy(&o.stdout).trim().to_string();
+            println!(
+                "updater manifest: {}",
+                if code == "200" {
+                    "reachable — settings checks quietly, never a forced modal"
+                } else {
+                    "unreachable — check the network, dictation is unaffected"
+                }
+            );
+        }
+        _ => {
+            println!("updater manifest: unreachable — check the network, dictation is unaffected");
+        }
+    }
     Ok(())
 }
 
