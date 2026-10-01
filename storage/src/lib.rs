@@ -71,9 +71,13 @@ fn open_db(path: &std::path::Path) -> Result<rusqlite::Connection, CoreError> {
          CREATE TABLE IF NOT EXISTS dictionary (
            phrase TEXT PRIMARY KEY
          );
-          CREATE TABLE IF NOT EXISTS privacy_apps (
-            app TEXT PRIMARY KEY
-          );
+           CREATE TABLE IF NOT EXISTS privacy_apps (
+             app TEXT PRIMARY KEY
+           );
+           CREATE TABLE IF NOT EXISTS app_profiles (
+             app TEXT PRIMARY KEY,
+             style TEXT NOT NULL
+           );
           CREATE TABLE IF NOT EXISTS kv (
             key TEXT PRIMARY KEY,
             value TEXT NOT NULL
@@ -353,6 +357,72 @@ impl SqlitePrivacy {
     }
 }
 
+/// Per-app formatting profiles (v0.8.0, issue 40).
+/// Sits beside the privacy list: one lookup answers where cloud may
+/// go (privacy) and how it should sound (this table).
+pub struct SqliteFormatProfiles {
+    conn: std::sync::Mutex<rusqlite::Connection>,
+}
+
+impl SqliteFormatProfiles {
+    pub fn open(path: &std::path::Path) -> Result<Self, CoreError> {
+        Ok(Self {
+            conn: std::sync::Mutex::new(open_db(path)?),
+        })
+    }
+
+    pub fn set(&self, app: &str, style: susurro_core::Style) -> Result<(), CoreError> {
+        let profile = susurro_core::FormatProfile::new(app, style)
+            .map_err(susurro_core::CoreError::Storage)?;
+        self.conn
+            .lock()
+            .map_err(|e| CoreError::Storage(format!("db lock poisoned: {e}")))?
+            .execute(
+                "INSERT INTO app_profiles (app, style) VALUES (?1, ?2)
+                 ON CONFLICT(app) DO UPDATE SET style = excluded.style",
+                rusqlite::params![profile.app, style.as_str()],
+            )
+            .map_err(|e| CoreError::Storage(e.to_string()))?;
+        Ok(())
+    }
+
+    pub fn remove(&self, app: &str) -> Result<(), CoreError> {
+        self.conn
+            .lock()
+            .map_err(|e| CoreError::Storage(format!("db lock poisoned: {e}")))?
+            .execute(
+                "DELETE FROM app_profiles WHERE app = ?1",
+                rusqlite::params![app.trim().to_lowercase()],
+            )
+            .map_err(|e| CoreError::Storage(e.to_string()))?;
+        Ok(())
+    }
+
+    // allow(let_and_return): same borrowck drop-order constraint as recent().
+    #[allow(clippy::let_and_return)]
+    pub fn list(&self) -> Result<Vec<susurro_core::FormatProfile>, CoreError> {
+        let conn = self
+            .conn
+            .lock()
+            .map_err(|e| CoreError::Storage(format!("db lock poisoned: {e}")))?;
+        let mut stmt = conn
+            .prepare("SELECT app, style FROM app_profiles ORDER BY app")
+            .map_err(|e| CoreError::Storage(e.to_string()))?;
+        let out = stmt
+            .query_map([], |row| {
+                let app: String = row.get(0)?;
+                let style_raw: String = row.get(1)?;
+                let style =
+                    susurro_core::Style::parse(&style_raw).unwrap_or(susurro_core::Style::Formal);
+                Ok(susurro_core::FormatProfile { app, style })
+            })
+            .map_err(|e| CoreError::Storage(e.to_string()))?
+            .collect::<Result<Vec<_>, _>>()
+            .map_err(|e| CoreError::Storage(e.to_string()));
+        out
+    }
+}
+
 /// Persistent key-value settings (v0.4.0, issue 26).
 /// One `kv` row per key, upserted. Backs the benchmark tier so the
 /// first-run pick survives restarts. Failures surface as Storage
@@ -628,6 +698,28 @@ mod tests {
         store.remove("kitty").unwrap();
         assert!(!store.list().unwrap().contains(&"kitty".to_string()));
         assert!(!store.policy().unwrap().is_local_only(Some("kitty")));
+        let _ = std::fs::remove_file(&p);
+    }
+
+    #[test]
+    fn format_profiles_roundtrip() {
+        let p = tmp_path("profiles");
+        let store = SqliteFormatProfiles::open(&p).unwrap();
+        assert!(store.list().unwrap().is_empty());
+        store.set("Docs", susurro_core::Style::Formal).unwrap();
+        store.set("chat", susurro_core::Style::Casual).unwrap();
+        // Re-setting the same app overwrites instead of duplicating.
+        store.set("docs", susurro_core::Style::Verbatim).unwrap();
+        let list = store.list().unwrap();
+        assert_eq!(list.len(), 2);
+        assert_eq!(list[0].app, "chat");
+        assert_eq!(list[0].style, susurro_core::Style::Casual);
+        assert_eq!(list[1].app, "docs");
+        assert_eq!(list[1].style, susurro_core::Style::Verbatim);
+        // Blank app names are rejected at the boundary.
+        assert!(store.set("  ", susurro_core::Style::Formal).is_err());
+        store.remove("chat").unwrap();
+        assert_eq!(store.list().unwrap().len(), 1);
         let _ = std::fs::remove_file(&p);
     }
 

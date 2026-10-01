@@ -34,6 +34,12 @@ export interface HistoryRow {
   latency_ms: number;
 }
 
+export interface FormatProfileRow {
+  app: string;
+  style: string;
+  cleanup: string;
+}
+
 export default function SettingsView() {
   const [s, setS] = useState<Settings>(DEFAULTS);
   const [saved, setSaved] = useState(false);
@@ -42,6 +48,10 @@ export default function SettingsView() {
   const [history, setHistory] = useState<HistoryRow[]>([]);
   const [showRaw, setShowRaw] = useState<Record<string, boolean>>({});
   const [historyNote, setHistoryNote] = useState("");
+  const [profiles, setProfiles] = useState<FormatProfileRow[]>([]);
+  const [profileApp, setProfileApp] = useState("");
+  const [profileStyle, setProfileStyle] = useState("formal");
+  const [profileNote, setProfileNote] = useState("");
 
   useEffect(() => {
     invoke<Settings>("get_settings").then(setS).catch(() => {});
@@ -90,6 +100,35 @@ export default function SettingsView() {
 
   function toggleRaw(session: string) {
     setShowRaw({ ...showRaw, [session]: !showRaw[session] });
+  }
+
+  async function loadProfiles() {
+    try {
+      setProfiles(await invoke<FormatProfileRow[]>("list_format_profiles"));
+      setProfileNote("");
+    } catch (e) {
+      setProfileNote(`Couldn't read profiles. ${e}`);
+    }
+  }
+
+  async function saveProfile() {
+    try {
+      await invoke("save_format_profile", { app: profileApp, style: profileStyle });
+      setProfileApp("");
+      setProfileNote(`profile saved: ${profileStyle}.`);
+      await loadProfiles();
+    } catch (e) {
+      setProfileNote(`Couldn't save profile. ${e}`);
+    }
+  }
+
+  async function removeProfile(app: string) {
+    try {
+      await invoke("remove_format_profile", { app });
+      await loadProfiles();
+    } catch (e) {
+      setProfileNote(`Couldn't remove profile. ${e}`);
+    }
   }
 
   function set<K extends keyof Settings>(k: K, v: Settings[K]) {
@@ -165,6 +204,56 @@ export default function SettingsView() {
           <option value="beta">beta</option>
         </select>
       </div>
+
+      <div className="field">
+        <label>Tone follows the app (formal in docs, casual in messages)</label>
+        <div className="row">
+          <button className="ghost" onClick={loadProfiles} aria-label="load format profiles">
+            load profiles
+          </button>
+        </div>
+        <div className="row">
+          <input
+            value={profileApp}
+            onChange={(e) => setProfileApp(e.target.value)}
+            placeholder="app pattern, e.g. docs"
+            aria-label="app pattern"
+          />
+          <select
+            value={profileStyle}
+            onChange={(e) => setProfileStyle(e.target.value)}
+            aria-label="profile style"
+          >
+            <option value="formal">formal (polish)</option>
+            <option value="casual">casual (tidy only)</option>
+            <option value="verbatim">verbatim (raw)</option>
+          </select>
+          <button className="ghost" onClick={saveProfile} aria-label="save format profile">
+            save profile
+          </button>
+        </div>
+      </div>
+      {profileNote && <div className="update-note">{profileNote}</div>}
+      {profiles.length > 0 && (
+        <div className="history">
+          {profiles.map((p) => (
+            <div key={p.app} className="history-row">
+              <div className="mono">
+                {p.app}: {p.style} (cleanup {p.cleanup})
+              </div>
+              <div className="row">
+                <button
+                  className="ghost"
+                  onClick={() => removeProfile(p.app)}
+                  aria-label={`remove profile ${p.app}`}
+                >
+                  remove
+                </button>
+              </div>
+            </div>
+          ))}
+        </div>
+      )}
 
       <div className="row">
         <button className="primary" onClick={save}>

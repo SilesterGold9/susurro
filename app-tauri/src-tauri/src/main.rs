@@ -196,6 +196,46 @@ fn shared_db_path() -> PathBuf {
 }
 
 #[derive(Clone, Serialize)]
+struct FormatProfileRow {
+    app: String,
+    style: String,
+    cleanup: String,
+}
+
+/// List per-app formatting profiles (v0.8.0, issue 40).
+#[tauri::command]
+fn list_format_profiles() -> Result<Vec<FormatProfileRow>, String> {
+    let store = susurro_storage::SqliteFormatProfiles::open(&shared_db_path())
+        .map_err(|e| e.to_string())?;
+    let profiles = store.list().map_err(|e| e.to_string())?;
+    Ok(profiles
+        .into_iter()
+        .map(|p| FormatProfileRow {
+            app: p.app.clone(),
+            cleanup: p.style.cleanup().to_string(),
+            style: p.style.as_str().to_string(),
+        })
+        .collect())
+}
+
+/// Set the formatting style for an app (formal, casual, verbatim).
+#[tauri::command]
+fn save_format_profile(app: String, style: String) -> Result<(), String> {
+    let style = susurro_core::Style::parse(&style)?;
+    let store = susurro_storage::SqliteFormatProfiles::open(&shared_db_path())
+        .map_err(|e| e.to_string())?;
+    store.set(&app, style).map_err(|e| e.to_string())
+}
+
+/// Remove an app formatting profile (falls back to the cleanup setting).
+#[tauri::command]
+fn remove_format_profile(app: String) -> Result<(), String> {
+    let store = susurro_storage::SqliteFormatProfiles::open(&shared_db_path())
+        .map_err(|e| e.to_string())?;
+    store.remove(&app).map_err(|e| e.to_string())
+}
+
+#[derive(Clone, Serialize)]
 struct HistoryRow {
     session: String,
     raw_text: String,
@@ -480,7 +520,21 @@ fn run_dictation(
     let focused = susurro_adapters_linux::focused_app();
     #[cfg(not(target_os = "linux"))]
     let focused: Option<String> = None;
-    let _ = app.emit("susurro://context", serde_json::json!({ "app": focused }));
+    // Format profile (v0.8.0, issue 40): tone follows the app, so a
+    // matching profile overrides the settings cleanup for this run.
+    // A broken store degrades to settings, never blocks dictation.
+    let profile_style: Option<String> = susurro_storage::SqliteFormatProfiles::open(
+        &shared_db_path(),
+    )
+    .ok()
+    .and_then(|store| store.list().ok())
+    .as_deref()
+    .and_then(|profiles| susurro_core::matched_profile(profiles, focused.as_deref()))
+    .map(|p| p.style.as_str().to_string());
+    let _ = app.emit(
+        "susurro://context",
+        serde_json::json!({ "app": focused, "profile": profile_style }),
+    );
     let cues = susurro_adapters_audio::CuePlayer::new(settings.sound);
 
     let pcm = capture_pcm(app, settings, &cues)?;
@@ -492,7 +546,13 @@ fn run_dictation(
     let passthrough = susurro_adapters_cleanup::PassthroughCleanup;
     let regex = susurro_adapters_cleanup::RegexCleanup;
     let ollama = susurro_adapters_cleanup::OllamaCleanup::new(&settings.ollama_model);
-    let cleanup: &dyn TextPostProcessorPort = match settings.cleanup.as_str() {
+    let cleanup_name: &str = match profile_style.as_deref() {
+        Some("formal") => "ollama",
+        Some("casual") => "regex",
+        Some("verbatim") => "none",
+        _ => settings.cleanup.as_str(),
+    };
+    let cleanup: &dyn TextPostProcessorPort = match cleanup_name {
         "ollama" => &ollama,
         "regex" => &regex,
         _ => &passthrough,
@@ -823,6 +883,9 @@ fn main() {
             run_doctor,
             list_history,
             restore_session,
+            list_format_profiles,
+            save_format_profile,
+            remove_format_profile,
             pill_drag_start,
             pill_drag_move
         ])

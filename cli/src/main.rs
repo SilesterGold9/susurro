@@ -149,6 +149,14 @@ enum Cmd {
     PrivacyRemove { app: String },
     /// List apps forced to local-only STT.
     PrivacyList,
+    /// Set the formatting style for an app (formal, casual, verbatim).
+    /// Formal polishes via the cleanup chain, casual tidies whitespace
+    /// only, verbatim injects the raw transcript.
+    ProfileAdd { app: String, style: String },
+    /// Remove an app formatting profile (falls back to --cleanup).
+    ProfileRemove { app: String },
+    /// List per-app formatting profiles beside the privacy policy.
+    ProfileList,
     /// Benchmark CPU once and persist the model tier (tiny, base,
     /// small). First listen benchmarks automatically; rerun this
     /// after a hardware change.
@@ -278,6 +286,9 @@ fn main() -> anyhow::Result<()> {
         Cmd::PrivacyAdd { app } => privacy_add(&app),
         Cmd::PrivacyRemove { app } => privacy_remove(&app),
         Cmd::PrivacyList => privacy_list(),
+        Cmd::ProfileAdd { app, style } => profile_add(&app, &style),
+        Cmd::ProfileRemove { app } => profile_remove(&app),
+        Cmd::ProfileList => profile_list(),
         Cmd::Bench => bench(),
         Cmd::SttBench => stt_bench(),
         Cmd::Replay { session } => replay(&session),
@@ -798,6 +809,17 @@ fn doctor() -> anyhow::Result<()> {
         },
         Err(e) => println!("privacy policy: degraded ({e}) — check db permissions"),
     }
+    // Format profiles (#40): tone follows the app.
+    match susurro_storage::SqliteFormatProfiles::open(&db_path()) {
+        Ok(store) => match store.list() {
+            Ok(profiles) => println!(
+                "format profiles: {} apps with a tone (formal, casual, verbatim). Manage with profile-add, profile-remove, profile-list",
+                profiles.len()
+            ),
+            Err(e) => println!("format profiles: degraded ({e}) — check db permissions"),
+        },
+        Err(e) => println!("format profiles: degraded ({e}) — check db permissions"),
+    }
     #[cfg(target_os = "linux")]
     println!(
         "focused app: {}",
@@ -1276,10 +1298,25 @@ fn run_utterance(opts: &ListenOpts, tickets: &TicketRegistry) -> anyhow::Result<
 
     // Cleanup: none (passthrough), regex fallback, or local Ollama LLM
     // (fails open to regex when Ollama is down or the model is missing).
+    // Format profile (#40): tone follows the app, so a matching profile
+    // overrides --cleanup for this run and says so on stderr.
+    let profile = profile_for_app(focused.as_deref());
+    if let Some(ref p) = profile {
+        eprintln!(
+            "profile: {} sounds {} (cleanup {}).",
+            p.app,
+            p.style.as_str(),
+            p.style.cleanup()
+        );
+    }
+    let cleanup_name: &str = match profile {
+        Some(ref p) => p.style.cleanup(),
+        None => opts.cleanup.as_str(),
+    };
     let passthrough = susurro_adapters_cleanup::PassthroughCleanup;
     let regex = susurro_adapters_cleanup::RegexCleanup;
     let ollama = susurro_adapters_cleanup::OllamaCleanup::new(&opts.ollama_model);
-    let cleanup: &dyn susurro_core::ports::TextPostProcessorPort = match opts.cleanup.as_str() {
+    let cleanup: &dyn susurro_core::ports::TextPostProcessorPort = match cleanup_name {
         "regex" => &regex,
         "ollama" => &ollama,
         "none" => &passthrough,
@@ -1657,6 +1694,26 @@ fn resolve_focused_app(explicit: Option<&str>) -> Option<String> {
     }
 }
 
+/// Format profile for the focused app (v0.8.0, issue 40).
+/// A broken store degrades to no profile, never blocks dictation.
+fn profile_for_app(focused: Option<&str>) -> Option<susurro_core::FormatProfile> {
+    let store = match susurro_storage::SqliteFormatProfiles::open(&db_path()) {
+        Ok(s) => s,
+        Err(e) => {
+            eprintln!("format profiles degraded (using --cleanup): {e}");
+            return None;
+        }
+    };
+    let profiles = match store.list() {
+        Ok(p) => p,
+        Err(e) => {
+            eprintln!("format profiles degraded (using --cleanup): {e}");
+            return None;
+        }
+    };
+    susurro_core::matched_profile(&profiles, focused).cloned()
+}
+
 fn privacy_add(app: &str) -> anyhow::Result<()> {
     let store = susurro_storage::SqlitePrivacy::open(&db_path())
         .map_err(|e| anyhow::anyhow!("Couldn't open privacy policy: {e}"))?;
@@ -1689,6 +1746,60 @@ fn privacy_list() -> anyhow::Result<()> {
         println!("local-only apps (cloud skipped):");
         for app in apps {
             println!("- {app}");
+        }
+    }
+    Ok(())
+}
+
+/// Set the formatting style for an app (v0.8.0, issue 40).
+/// Tone follows the app: formal in docs, casual in messages,
+/// verbatim where the transcript must stay untouched.
+fn profile_add(app: &str, style: &str) -> anyhow::Result<()> {
+    let style = susurro_core::Style::parse(style).map_err(|e| anyhow::anyhow!("{e}"))?;
+    let store = susurro_storage::SqliteFormatProfiles::open(&db_path())
+        .map_err(|e| anyhow::anyhow!("Couldn't open format profiles: {e}"))?;
+    store
+        .set(app, style)
+        .map_err(|e| anyhow::anyhow!("Couldn't set profile: {e}"))?;
+    println!(
+        "profile: {} sounds {} (cleanup {})",
+        app.trim().to_lowercase(),
+        style.as_str(),
+        style.cleanup()
+    );
+    Ok(())
+}
+
+fn profile_remove(app: &str) -> anyhow::Result<()> {
+    let store = susurro_storage::SqliteFormatProfiles::open(&db_path())
+        .map_err(|e| anyhow::anyhow!("Couldn't open format profiles: {e}"))?;
+    store
+        .remove(app)
+        .map_err(|e| anyhow::anyhow!("Couldn't remove profile: {e}"))?;
+    println!(
+        "profile removed: {} (falls back to --cleanup)",
+        app.trim().to_lowercase()
+    );
+    Ok(())
+}
+
+fn profile_list() -> anyhow::Result<()> {
+    let store = susurro_storage::SqliteFormatProfiles::open(&db_path())
+        .map_err(|e| anyhow::anyhow!("Couldn't open format profiles: {e}"))?;
+    let profiles = store
+        .list()
+        .map_err(|e| anyhow::anyhow!("Couldn't list profiles: {e}"))?;
+    if profiles.is_empty() {
+        println!("no format profiles. Dictation uses --cleanup everywhere.");
+    } else {
+        println!("format profiles (tone follows the app):");
+        for p in profiles {
+            println!(
+                "- {}: {} (cleanup {})",
+                p.app,
+                p.style.as_str(),
+                p.style.cleanup()
+            );
         }
     }
     Ok(())
