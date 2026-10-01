@@ -71,6 +71,11 @@ enum Cmd {
         /// runtime are all present, else CPU. Decoder always CPU.
         #[arg(long, default_value = "auto")]
         backend: String,
+        /// Race cloud against local STT: first success wins. Needs a
+        /// configured cloud key and a reachable network; otherwise the
+        /// run stays on the normal chain. Costs the slowest side.
+        #[arg(long, default_value_t = false)]
+        turbo: bool,
     },
     /// Wait for the Hyprland hotkey, then run Listen in a loop.
     Daemon {
@@ -111,6 +116,11 @@ enum Cmd {
         /// runtime are all present, else CPU. Decoder always CPU.
         #[arg(long, default_value = "auto")]
         backend: String,
+        /// Race cloud against local STT: first success wins. Needs a
+        /// configured cloud key and a reachable network; otherwise the
+        /// run stays on the normal chain. Costs the slowest side.
+        #[arg(long, default_value_t = false)]
+        turbo: bool,
     },
     /// Print Hyprland bind snippet for the hotkey socket.
     HyprlandBind {
@@ -212,6 +222,7 @@ fn main() -> anyhow::Result<()> {
             app,
             live,
             backend,
+            turbo,
         } => listen_real(&ListenOpts {
             seconds,
             model,
@@ -225,6 +236,7 @@ fn main() -> anyhow::Result<()> {
             app,
             live,
             backend,
+            turbo,
             mock_text: "hello from susurro".into(),
         }),
         Cmd::Daemon {
@@ -241,6 +253,7 @@ fn main() -> anyhow::Result<()> {
             app,
             live,
             backend,
+            turbo,
         } => daemon(
             &socket,
             &ListenOpts {
@@ -256,6 +269,7 @@ fn main() -> anyhow::Result<()> {
                 app,
                 live,
                 backend,
+                turbo,
                 mock_text: "hello from susurro".into(),
             },
         ),
@@ -321,6 +335,7 @@ struct ListenOpts {
     app: Option<String>,
     live: bool,
     backend: String,
+    turbo: bool,
     mock_text: String,
 }
 
@@ -1214,13 +1229,20 @@ fn run_utterance(opts: &ListenOpts, tickets: &TicketRegistry) -> anyhow::Result<
     let mock_stt;
     let real_stt;
     let chain_stt;
+    let turbo_local;
+    let turbo_stt;
     let chain_ref: Option<&susurro_adapters_stt_cloud::SttFallbackChain>;
+    let turbo_ref: Option<&susurro_adapters_stt_cloud::TurboStt<'_>>;
     let stt: &dyn SpeechToTextPort = if opts.mock {
+        if opts.turbo {
+            eprintln!("turbo needs real STT: mock runs stay single.");
+        }
         mock_stt = MockSttOnce {
             text: opts.mock_text.clone(),
             partial_calls: Default::default(),
         };
         chain_ref = None;
+        turbo_ref = None;
         &mock_stt
     } else {
         let groq_cfg = cloud_config(
@@ -1234,10 +1256,14 @@ fn run_utterance(opts: &ListenOpts, tickets: &TicketRegistry) -> anyhow::Result<
             &susurro_nim_model(),
         );
         if groq_cfg.is_none() && nim_cfg.is_none() || force_local {
+            if opts.turbo {
+                eprintln!("turbo needs a cloud key: no providers, staying local.");
+            }
             real_stt = susurro_adapters_stt_local::WhisperLocal::base_en(model_path.into())
                 .with_prompt(&dict_prompt)
                 .with_backend(local_backend.clone());
             chain_ref = None;
+            turbo_ref = None;
             &real_stt
         } else {
             // Pre-warm the cloud chain: resolve hosts, build clients, and check DNS before
@@ -1255,9 +1281,10 @@ fn run_utterance(opts: &ListenOpts, tickets: &TicketRegistry) -> anyhow::Result<
                     let _ips = susurro_adapters_stt_cloud::preresolve_host(&h).ok();
                 }
             }
-            let local = susurro_adapters_stt_local::WhisperLocal::base_en(model_path.into())
-                .with_prompt(&dict_prompt)
-                .with_backend(local_backend.clone());
+            let local =
+                susurro_adapters_stt_local::WhisperLocal::base_en(model_path.clone().into())
+                    .with_prompt(&dict_prompt)
+                    .with_backend(local_backend.clone());
             let mut chain = susurro_adapters_stt_cloud::SttFallbackChain::new(Box::new(local));
             if let Some(cfg) = groq_cfg {
                 chain = chain.add_provider(
@@ -1277,7 +1304,22 @@ fn run_utterance(opts: &ListenOpts, tickets: &TicketRegistry) -> anyhow::Result<
             }
             chain_stt = chain;
             chain_ref = Some(&chain_stt);
-            &chain_stt
+            // Turbo (v0.9.0, issue 46): race the chain against a
+            // second local instance, first success wins. The chain
+            // keeps its own local fallback; turbo adds the racer.
+            if opts.turbo {
+                eprintln!("turbo: racing cloud vs local, first success wins.");
+                turbo_local =
+                    susurro_adapters_stt_local::WhisperLocal::base_en(model_path.clone().into())
+                        .with_prompt(&dict_prompt)
+                        .with_backend(local_backend.clone());
+                turbo_stt = susurro_adapters_stt_cloud::TurboStt::new(&chain_stt, &turbo_local);
+                turbo_ref = Some(&turbo_stt);
+                &turbo_stt
+            } else {
+                turbo_ref = None;
+                &chain_stt
+            }
         }
     };
     // Name the placement every real run: encoder versus decoder.
@@ -1388,6 +1430,15 @@ fn run_utterance(opts: &ListenOpts, tickets: &TicketRegistry) -> anyhow::Result<
     let latency_ms = t0.elapsed().as_millis() as u64;
     let provider = if opts.mock {
         "mock".to_string()
+    } else if let Some(t) = turbo_ref {
+        match t.last_winner() {
+            Some((w, ms)) => {
+                eprintln!("turbo winner: {w} {ms}ms.");
+                format!("turbo-{w}")
+            }
+            // Unreachable: the race ran or the run above already failed.
+            None => "turbo-unraced".into(),
+        }
     } else if let Some(c) = chain_ref {
         c.last_provider()
     } else {

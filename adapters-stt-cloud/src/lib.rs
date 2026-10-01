@@ -15,9 +15,11 @@
 pub mod chain;
 pub mod http;
 pub mod network;
+pub mod turbo;
 pub use chain::{SttFallbackChain, DEFAULT_COOLDOWN_SECS, DEFAULT_FAILURE_THRESHOLD};
 pub use http::{host_of, pooled_client, preresolve_host};
 pub use network::{MockNetwork, NetworkStatus};
+pub use turbo::TurboStt;
 
 use susurro_core::ports::{SpeechToTextPort, Transcript};
 use susurro_core::CoreError;
