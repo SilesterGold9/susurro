@@ -1352,7 +1352,15 @@ fn main() {
         .setup(move |app| {
             spawn_hotkey_listener(app.handle().clone(), hotkey_state.clone());
             build_tray(app.handle())?;
-            // First run walks through onboarding instead of settings.
+            // Startup inventory: every window with its label, visibility,
+            // and URL. Diagnosing wrong-window reports starts here.
+            for (label, w) in app.webview_windows() {
+                eprintln!(
+                    "window: label={label} visible={:?} url={:?}",
+                    w.is_visible().unwrap_or(false),
+                    w.url().map(|u| u.to_string()).unwrap_or_default(),
+                );
+            }
             let done = app
                 .state::<Arc<AppState>>()
                 .settings
