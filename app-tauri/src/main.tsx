@@ -28,10 +28,14 @@ function route(): string {
 function App() {
   const [routeName] = React.useState(route);
   React.useEffect(() => {
-    // Temporary diagnosis: the titlebar names the branch until the
-    // wrong-window report is closed.
+    // Temporary diagnosis: the native title names the branch until
+    // the wrong-window report is closed. document.title alone never
+    // reaches a desktop titlebar, so this uses the window API.
     try {
       document.title = `Susurro (${routeName})`;
+    } catch {}
+    try {
+      void getCurrentWindow().setTitle(`Susurro (${routeName})`);
     } catch {}
   }, [routeName]);
   if (routeName === "pill")
