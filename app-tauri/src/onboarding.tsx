@@ -1,0 +1,237 @@
+import { useEffect, useState } from "react";
+import { invoke } from "@tauri-apps/api/core";
+import { getCurrentWindow } from "@tauri-apps/api/window";
+
+interface OnboardingStatus {
+  model_found: boolean;
+  model_path: string;
+  tier: string | null;
+  hotkey: string;
+  onboarding_done: boolean;
+}
+
+interface BenchResult {
+  tier: string;
+  iters_per_sec: number;
+  elapsed_ms: number;
+  cores: number;
+  persisted: boolean;
+}
+
+interface TestResult {
+  raw: string;
+  cleaned: string;
+  latency_ms: number;
+}
+
+const HOTKEYS = [
+  { name: "super_shift_r", label: "Super + Shift + R" },
+  { name: "ctrl_shift_r", label: "Ctrl + Shift + R" },
+  { name: "shift_d", label: "Shift + D" },
+];
+
+export default function OnboardingView() {
+  const [step, setStep] = useState(1);
+  const [status, setStatus] = useState<OnboardingStatus | null>(null);
+  const [bench, setBench] = useState<BenchResult | null>(null);
+  const [snippet, setSnippet] = useState("");
+  const [hotkey, setHotkey] = useState("super_shift_r");
+  const [testOut, setTestOut] = useState<TestResult | null>(null);
+  const [busy, setBusy] = useState("");
+  const [note, setNote] = useState("");
+
+  async function refresh() {
+    try {
+      const s = await invoke<OnboardingStatus>("onboarding_status");
+      setStatus(s);
+      setHotkey(s.hotkey || "super_shift_r");
+    } catch (e) {
+      setNote(`Couldn't read setup state. ${e}`);
+    }
+  }
+
+  useEffect(() => {
+    refresh();
+  }, []);
+
+  useEffect(() => {
+    invoke<string>("hotkey_snippet", { hotkey }).then(setSnippet).catch(() => {});
+  }, [hotkey]);
+
+  async function download() {
+    setBusy("model");
+    setNote("");
+    try {
+      const path = await invoke<string>("download_model");
+      setNote(`model ready: ${path}.`);
+      await refresh();
+    } catch (e) {
+      setNote(`Couldn't download the model. ${e}`);
+    }
+    setBusy("");
+  }
+
+  async function runBench() {
+    setBusy("bench");
+    setNote("");
+    try {
+      setBench(await invoke<BenchResult>("run_bench"));
+      await refresh();
+    } catch (e) {
+      setNote(`Couldn't run the benchmark. ${e}`);
+    }
+    setBusy("");
+  }
+
+  async function testMic() {
+    setBusy("test");
+    setNote("");
+    setTestOut(null);
+    try {
+      setTestOut(await invoke<TestResult>("test_dictation"));
+    } catch (e) {
+      setNote(`Test failed. ${e}`);
+    }
+    setBusy("");
+  }
+
+  async function finish() {
+    setBusy("finish");
+    try {
+      await invoke("finish_onboarding", { hotkey });
+      await getCurrentWindow().close();
+    } catch (e) {
+      setNote(`Couldn't finish setup. ${e}`);
+      setBusy("");
+    }
+  }
+
+  return (
+    <div className="settings">
+      <h1 className="brand-wordmark" aria-label="susurro,">
+        susurro<span className="comma" aria-hidden="true">,</span>
+      </h1>
+      <div className="sub">
+        Setup, screen {step} of 4. No tutorial, no maze.
+      </div>
+
+      {step === 1 && (
+        <div className="field">
+          <label>1. Model plus speed check</label>
+          <div className="sub">
+            {status
+              ? status.model_found
+                ? `model found: ${status.model_path}.`
+                : `model missing: ${status.model_path}. Download base.en to continue.`
+              : "checking model..."}
+          </div>
+          <div className="row">
+            <button
+              className="primary"
+              onClick={download}
+              disabled={busy === "model" || !!status?.model_found}
+            >
+              {busy === "model" ? "downloading..." : "download model"}
+            </button>
+            <button className="ghost" onClick={runBench} disabled={busy === "bench"}>
+              {busy === "bench" ? "measuring..." : "run speed check"}
+            </button>
+          </div>
+          {(bench || status?.tier) && (
+            <div className="sub">
+              {bench
+                ? `this machine: ${bench.tier} tier at ${bench.iters_per_sec} iters/s on ${bench.cores} cores${bench.persisted ? ", saved" : ", not saved"}.`
+                : `saved tier: ${status?.tier}.`}
+            </div>
+          )}
+          <div className="row">
+            <button className="primary" onClick={() => setStep(2)}>
+              next
+            </button>
+          </div>
+        </div>
+      )}
+
+      {step === 2 && (
+        <div className="field">
+          <label>2. Pick the dictation hotkey</label>
+          {HOTKEYS.map((h) => (
+            <div className="field row" key={h.name}>
+              <input
+                type="radio"
+                name="hotkey"
+                checked={hotkey === h.name}
+                onChange={() => setHotkey(h.name)}
+                aria-label={h.label}
+              />
+              <span>{h.label}</span>
+            </div>
+          ))}
+          <div className="sub">On Hyprland, add this line to hyprland.conf:</div>
+          <div className="history">
+            <pre className="mono" style={{ whiteSpace: "pre-wrap" }}>
+              {snippet}
+            </pre>
+          </div>
+          <div className="row">
+            <button className="ghost" onClick={() => setStep(1)}>
+              back
+            </button>
+            <button className="primary" onClick={() => setStep(3)}>
+              next
+            </button>
+          </div>
+        </div>
+      )}
+
+      {step === 3 && (
+        <div className="field">
+          <label>3. Test dictation (6 seconds)</label>
+          <div className="sub">Press the button, speak, and the transcript lands here.</div>
+          <div className="row">
+            <button className="primary" onClick={testMic} disabled={busy === "test"}>
+              {busy === "test" ? "listening..." : "speak now"}
+            </button>
+          </div>
+          {testOut && (
+            <div className="history">
+              <div className="mono" style={{ whiteSpace: "pre-wrap" }}>
+                {testOut.cleaned || testOut.raw}
+              </div>
+              <div className="sub">{testOut.latency_ms}ms end to end.</div>
+            </div>
+          )}
+          <div className="row">
+            <button className="ghost" onClick={() => setStep(2)}>
+              back
+            </button>
+            <button className="primary" onClick={() => setStep(4)}>
+              next
+            </button>
+          </div>
+        </div>
+      )}
+
+      {step === 4 && (
+        <div className="field">
+          <label>4. Done</label>
+          <div className="sub">
+            Model {status?.model_found ? "ready" : "still missing (dictation falls back to $SUSURRO_MODEL)"},
+            speed tier {status?.tier || bench?.tier || "unset"},
+            hotkey {HOTKEYS.find((h) => h.name === hotkey)?.label}.
+          </div>
+          <div className="row">
+            <button className="ghost" onClick={() => setStep(3)}>
+              back
+            </button>
+            <button className="primary" onClick={finish} disabled={busy === "finish"}>
+              {busy === "finish" ? "saving..." : "start dictating"}
+            </button>
+          </div>
+        </div>
+      )}
+
+      {note && <div className="update-note">{note}</div>}
+    </div>
+  );
+}

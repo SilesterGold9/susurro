@@ -116,6 +116,9 @@ enum Cmd {
     HyprlandBind {
         #[arg(long, default_value = "/tmp/susurro.sock")]
         socket: String,
+        /// Hotkey choice: super_shift_r, ctrl_shift_r, or shift_d.
+        #[arg(long, default_value = "super_shift_r")]
+        hotkey: String,
     },
     /// Show recent transcript history (newest first).
     History {
@@ -250,10 +253,10 @@ fn main() -> anyhow::Result<()> {
                 mock_text: "hello from susurro".into(),
             },
         ),
-        Cmd::HyprlandBind { socket } => {
+        Cmd::HyprlandBind { socket, hotkey } => {
             println!("Add to hyprland.conf:");
-            println!("bind = SUPER_SHIFT, R, exec, echo toggle | socat - UNIX-CONNECT:{socket}");
-            println!("(R may be taken, e.g. by wallbash — Shift+D works too.)");
+            println!("{}", hyprland_bind_line(&hotkey, &socket));
+            println!("(Choices: super_shift_r, ctrl_shift_r, shift_d. R may be taken, e.g. by wallbash.)");
             println!();
             println!("Pill overlay rules for Hyprland 0.53+ (the compositor owns");
             println!("placement on Wayland; clients cannot position windows).");
@@ -1673,6 +1676,18 @@ fn key_clear(provider_name: &str) -> anyhow::Result<()> {
         .map_err(|e| anyhow::anyhow!("Couldn't clear key: {e}"))?;
     println!("cleared {provider_name} key from keyring.");
     Ok(())
+}
+
+/// Hyprland bind line for an onboarding hotkey choice (v0.8.0,
+/// issue 41). Unknown names fall back to SUPER_SHIFT+R, same as the
+/// Windows default fallback.
+fn hyprland_bind_line(hotkey: &str, socket: &str) -> String {
+    let combo = match hotkey.trim().to_lowercase().as_str() {
+        "ctrl_shift_r" => "CTRL_SHIFT, R",
+        "shift_d" => "SHIFT, D",
+        _ => "SUPER_SHIFT, R",
+    };
+    format!("bind = {combo}, exec, echo toggle | socat - UNIX-CONNECT:{socket}")
 }
 
 /// Focused app for privacy routing: explicit --app wins, else Hyprland

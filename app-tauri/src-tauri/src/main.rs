@@ -24,6 +24,14 @@ struct Settings {
     device: String,
     socket_path: String,
     update_channel: String,
+    #[serde(default = "default_hotkey")]
+    hotkey: String,
+    #[serde(default)]
+    onboarding_done: bool,
+}
+
+fn default_hotkey() -> String {
+    "super_shift_r".into()
 }
 
 impl Default for Settings {
@@ -38,6 +46,8 @@ impl Default for Settings {
             device: String::new(),
             socket_path: "/tmp/susurro.sock".into(),
             update_channel: "stable".into(),
+            hotkey: default_hotkey(),
+            onboarding_done: false,
         }
     }
 }
@@ -233,6 +243,142 @@ fn remove_format_profile(app: String) -> Result<(), String> {
     let store = susurro_storage::SqliteFormatProfiles::open(&shared_db_path())
         .map_err(|e| e.to_string())?;
     store.remove(&app).map_err(|e| e.to_string())
+}
+
+/// First-run state for the onboarding flow (v0.8.0, issue 41).
+#[derive(Clone, Serialize)]
+struct OnboardingStatus {
+    model_found: bool,
+    model_path: String,
+    tier: Option<String>,
+    hotkey: String,
+    onboarding_done: bool,
+}
+
+/// Where onboarding stands: model on disk, persisted bench tier,
+/// chosen hotkey, and whether the flow already finished.
+#[tauri::command]
+fn onboarding_status(state: State<'_, Arc<AppState>>) -> Result<OnboardingStatus, String> {
+    let settings = state.settings.lock().map_err(|e| e.to_string())?.clone();
+    let path = resolve_whisper(&settings.whisper_model);
+    let model_found = std::path::Path::new(&path).exists();
+    let tier = susurro_storage::SqliteSettings::open(&shared_db_path())
+        .ok()
+        .and_then(|s| susurro_adapters_stt_local::bench::load_tier(&s))
+        .map(|t| t.as_str().to_string());
+    Ok(OnboardingStatus {
+        model_found,
+        model_path: path,
+        tier,
+        hotkey: settings.hotkey,
+        onboarding_done: settings.onboarding_done,
+    })
+}
+
+/// Download base.en from the whisper.cpp release mirror into the
+/// models dir. Atomic temp plus rename, so a retry converges instead
+/// of leaving a half file behind.
+#[tauri::command]
+fn download_model(app: AppHandle) -> Result<String, String> {
+    const MODEL_URL: &str =
+        "https://huggingface.co/ggerganov/whisper.cpp/resolve/main/ggml-base.en.bin";
+    let dir = models_home().ok_or_else(|| "no models dir on this machine.".to_string())?;
+    std::fs::create_dir_all(&dir).map_err(|e| e.to_string())?;
+    let dest = dir.join("base.en.bin");
+    if dest.exists() {
+        return Ok(dest.to_string_lossy().into_owned());
+    }
+    let tmp = dir.join("base.en.bin.tmp");
+    let _ = app.emit(
+        "susurro://onboarding",
+        serde_json::json!({ "step": "model", "state": "downloading" }),
+    );
+    let status = std::process::Command::new("curl")
+        .args([
+            "-sSL",
+            "--fail",
+            MODEL_URL,
+            "-o",
+            &tmp.to_string_lossy(),
+        ])
+        .status()
+        .map_err(|e| format!("Couldn't run curl (is curl installed?): {e}"))?;
+    if !status.success() {
+        let _ = std::fs::remove_file(&tmp);
+        let _ = app.emit(
+            "susurro://onboarding",
+            serde_json::json!({ "step": "model", "state": "failed" }),
+        );
+        return Err("model download failed. Check the network and retry.".into());
+    }
+    std::fs::rename(&tmp, &dest).map_err(|e| e.to_string())?;
+    let _ = app.emit(
+        "susurro://onboarding",
+        serde_json::json!({ "step": "model", "state": "done" }),
+    );
+    Ok(dest.to_string_lossy().into_owned())
+}
+
+/// Run the CPU benchmark and persist the winning tier, same as the
+/// CLI bench. The tier pick rides inside onboarding screen one.
+#[tauri::command]
+fn run_bench() -> Result<serde_json::Value, String> {
+    use susurro_adapters_stt_local::bench;
+    let (tier, probe) = bench::benchmark();
+    let persisted = match susurro_storage::SqliteSettings::open(&shared_db_path()) {
+        Ok(mut store) => bench::store_tier(&mut store, tier)
+            .map(|_| true)
+            .unwrap_or(false),
+        Err(_) => false,
+    };
+    Ok(serde_json::json!({
+        "tier": tier.as_str(),
+        "iters_per_sec": probe.iters_per_sec,
+        "elapsed_ms": probe.elapsed_ms,
+        "cores": probe.cores,
+        "persisted": persisted,
+    }))
+}
+
+/// Short test dictation for onboarding screen three: six seconds,
+/// then the transcript shows in the window.
+#[tauri::command]
+fn test_dictation(app: AppHandle, state: State<'_, Arc<AppState>>) -> Result<UtteranceResult, String> {
+    let mut settings = state.settings.lock().map_err(|e| e.to_string())?.clone();
+    settings.seconds = 6;
+    let tickets = TicketRegistry::new();
+    run_dictation(&app, &settings, &tickets)
+}
+
+/// Hyprland bind line for a hotkey choice, same names as the CLI
+/// hyprland-bind --hotkey flag.
+#[tauri::command]
+fn hotkey_snippet(hotkey: String) -> String {
+    let combo = match hotkey.trim().to_lowercase().as_str() {
+        "ctrl_shift_r" => "CTRL_SHIFT, R",
+        "shift_d" => "SHIFT, D",
+        _ => "SUPER_SHIFT, R",
+    };
+    format!("bind = {combo}, exec, echo toggle | socat - UNIX-CONNECT:/tmp/susurro.sock")
+}
+
+/// Finish onboarding: store the hotkey choice and close the flow.
+/// First run never returns after this; settings opens instead.
+#[tauri::command]
+fn finish_onboarding(
+    hotkey: String,
+    state: State<'_, Arc<AppState>>,
+) -> Result<(), String> {
+    let hotkey = match hotkey.trim().to_lowercase().as_str() {
+        "ctrl_shift_r" | "shift_d" => hotkey.trim().to_lowercase(),
+        _ => default_hotkey(),
+    };
+    {
+        let mut settings = state.settings.lock().map_err(|e| e.to_string())?;
+        settings.hotkey = hotkey;
+        settings.onboarding_done = true;
+    }
+    state.save()
 }
 
 #[derive(Clone, Serialize)]
@@ -795,8 +941,14 @@ fn spawn_hotkey_listener(app: AppHandle, state: Arc<AppState>) {
             Box::new(susurro_adapters_linux::HyprlandSocket::new(&socket_path))
         };
         #[cfg(target_os = "windows")]
-        let hotkey: Box<dyn GlobalHotkeyPort> =
-            Box::new(susurro_adapters_windows::WindowsHotkey::with_defaults());
+        let hotkey: Box<dyn GlobalHotkeyPort> = {
+            let name = state
+                .settings
+                .lock()
+                .map(|s| s.hotkey.clone())
+                .unwrap_or_else(|_| default_hotkey());
+            Box::new(susurro_adapters_windows::hotkey_from_name(&name))
+        };
         #[cfg(not(any(target_os = "linux", target_os = "windows")))]
         let hotkey: Box<dyn GlobalHotkeyPort> = {
             // No listener here: sleep forever instead of hot-spinning.
@@ -886,12 +1038,30 @@ fn main() {
             list_format_profiles,
             save_format_profile,
             remove_format_profile,
+            onboarding_status,
+            download_model,
+            run_bench,
+            test_dictation,
+            hotkey_snippet,
+            finish_onboarding,
             pill_drag_start,
             pill_drag_move
         ])
         .setup(move |app| {
             spawn_hotkey_listener(app.handle().clone(), hotkey_state.clone());
             build_tray(app.handle())?;
+            // First run walks through onboarding instead of settings.
+            let done = app
+                .state::<Arc<AppState>>()
+                .settings
+                .lock()
+                .map(|s| s.onboarding_done)
+                .unwrap_or(true);
+            if !done {
+                if let Some(w) = app.get_webview_window("onboarding") {
+                    let _ = w.show();
+                }
+            }
             Ok(())
         })
         .run(tauri::generate_context!())

@@ -33,6 +33,14 @@
         "width": 480,
         "height": 720,
         "visible": false
+      },
+      {
+        "label": "onboarding",
+        "title": "Susurro setup",
+        "url": "/",
+        "width": 480,
+        "height": 560,
+        "visible": false
       }
     ],
     "trayIcon": {

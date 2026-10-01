@@ -3,6 +3,7 @@ import ReactDOM from "react-dom/client";
 import { getCurrentWindow } from "@tauri-apps/api/window";
 import Pill from "./pill";
 import SettingsView from "./settings";
+import OnboardingView from "./onboarding";
 import "./styles.css";
 
 function App() {
@@ -12,7 +13,9 @@ function App() {
       setLabel(getCurrentWindow().label);
     } catch {}
   }, []);
-  return label === "settings" ? <SettingsView /> : <Pill />;
+  if (label === "settings") return <SettingsView />;
+  if (label === "onboarding") return <OnboardingView />;
+  return <Pill />;
 }
 
 ReactDOM.createRoot(document.getElementById("root")!).render(

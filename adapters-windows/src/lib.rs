@@ -20,6 +20,21 @@ use susurro_core::{CoreError, Ticket};
 pub const DEFAULT_MODIFIERS_WIN: u32 = 0x0008 | 0x0004;
 pub const DEFAULT_VK_R: u32 = 0x52;
 
+/// Named hotkey choices offered by onboarding (v0.8.0, issue 41).
+/// The same names drive the Hyprland bind snippet on Linux, so one
+/// stored string answers both platforms.
+pub const HOTKEY_CHOICES: &[&str] = &["super_shift_r", "ctrl_shift_r", "shift_d"];
+
+/// Build a hotkey from an onboarding choice name. Unknown names fall
+/// back to the default instead of failing registration.
+pub fn hotkey_from_name(name: &str) -> WindowsHotkey {
+    match name.trim().to_lowercase().as_str() {
+        "ctrl_shift_r" => WindowsHotkey::new(0x0002 | 0x0004, 0x52),
+        "shift_d" => WindowsHotkey::new(0x0004, 0x44),
+        _ => WindowsHotkey::with_defaults(),
+    }
+}
+
 /// Single id for our hotkey registration. One hotkey per process.
 pub const HOTKEY_ID: i32 = 1;
 
@@ -276,6 +291,17 @@ mod tests {
         assert!(validate_hotkey(0x0004, 0x52).is_ok());
         assert!(validate_hotkey(0, 0x52).is_err());
         assert!(validate_hotkey(0x0004, 0).is_err());
+    }
+
+    #[test]
+    fn named_hotkeys_map_and_fall_back() {
+        assert_eq!(hotkey_from_name("super_shift_r").modifiers, 0x0008 | 0x0004);
+        assert_eq!(hotkey_from_name("super_shift_r").vk, 0x52);
+        assert_eq!(hotkey_from_name("ctrl_shift_r").modifiers, 0x0002 | 0x0004);
+        assert_eq!(hotkey_from_name("shift_d").vk, 0x44);
+        // Unknown names degrade to the default, never fail registration.
+        assert_eq!(hotkey_from_name("fancy").vk, DEFAULT_VK_R);
+        assert!(HOTKEY_CHOICES.contains(&"super_shift_r"));
     }
 
     #[test]
