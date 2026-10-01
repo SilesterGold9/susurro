@@ -441,6 +441,40 @@ mod tests {
         assert!(super::TextInjectionPort::inject(&injector, "", &ticket).is_ok());
     }
 
+    #[cfg(test)]
+    mod property_tests {
+        use proptest::prelude::*;
+
+        proptest! {
+            /// Fuzz the mock injector: arbitrary text (empty, unicode,
+            /// huge) records verbatim and never fails on either method.
+            #[test]
+            fn mock_injector_records_verbatim(text in "[\\s\\S]{0,500}") {
+                let injector = crate::MockInjector::new();
+                let ticket = susurro_core::Ticket::new(
+                    susurro_core::SessionId::new(1),
+                    "inject",
+                );
+                use susurro_core::ports::TextInjectionPort;
+                prop_assert!(injector.inject(&text, &ticket).is_ok());
+                prop_assert!(injector.remove_last(&text, &ticket).is_ok());
+                let seen = injector.seen.lock().unwrap().clone();
+                let removed = injector.removed.lock().unwrap().clone();
+                prop_assert_eq!(seen.as_slice(), [text.clone()]);
+                prop_assert_eq!(removed.as_slice(), [text]);
+            }
+
+            /// Removal selects one Left per char, on any input.
+            #[cfg(target_os = "linux")]
+            #[test]
+            fn remove_span_matches_char_count(text in "[\\s\\S]{0,200}") {
+                let args = crate::ydotool_remove_args(&text);
+                let lefts = args.iter().filter(|a| a.as_str() == "105:1").count();
+                prop_assert_eq!(lefts, text.chars().count());
+            }
+        }
+    }
+
     /// Fake tool bin dir on PATH. Serializes PATH mutation across tests.
     /// Linux-only: the fakes are shell scripts.
     #[cfg(target_os = "linux")]

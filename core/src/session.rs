@@ -111,3 +111,28 @@ mod tests {
         assert!(reg.claim(&Ticket::new(s, "history-write")).unwrap());
     }
 }
+
+#[cfg(test)]
+mod property_tests {
+    use super::*;
+    use proptest::prelude::*;
+    use std::collections::HashSet;
+
+    const OPS: &[&str] = &["inject", "remove", "history-write", "restore"];
+
+    proptest! {
+        /// Random claim streams converge with a HashSet model: first
+        /// claim wins, repeats lose, distinct pairs never collide.
+        #[test]
+        fn claims_match_set_model(
+            ops in prop::collection::vec((any::<u128>(), 0..4usize), 0..100)
+        ) {
+            let reg = TicketRegistry::new();
+            let mut model = HashSet::new();
+            for (session, op) in ops {
+                let ticket = Ticket::new(SessionId::new(session), OPS[op]);
+                prop_assert_eq!(reg.claim(&ticket).unwrap(), model.insert(ticket.key()));
+            }
+        }
+    }
+}

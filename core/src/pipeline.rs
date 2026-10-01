@@ -126,9 +126,9 @@ mod tests {
     use super::*;
     use crate::ports::AudioChunk;
 
-    struct MockCapture {
-        chunks: Vec<AudioChunk>,
-        i: usize,
+    pub(crate) struct MockCapture {
+        pub(crate) chunks: Vec<AudioChunk>,
+        pub(crate) i: usize,
     }
     impl AudioCapturePort for MockCapture {
         fn start(&mut self) -> Result<(), crate::CoreError> {
@@ -160,7 +160,7 @@ mod tests {
         }
     }
 
-    struct MockInject {
+    pub(crate) struct MockInject {
         pub seen: std::sync::Mutex<Vec<String>>,
         pub removed: std::sync::Mutex<Vec<String>>,
     }
@@ -298,5 +298,81 @@ mod tests {
                 crate::Stage::Injecting
             ]
         );
+    }
+}
+
+#[cfg(test)]
+mod property_tests {
+    use super::tests::{MockCapture, MockInject};
+    use super::*;
+    use crate::ports::AudioChunk;
+    use proptest::prelude::*;
+
+    struct VarStt(String);
+    impl SpeechToTextPort for VarStt {
+        fn transcribe(&self, _pcm: &[i16]) -> Result<crate::ports::Transcript, crate::CoreError> {
+            Ok(crate::ports::Transcript {
+                text: self.0.clone(),
+                is_partial: false,
+            })
+        }
+        fn model_name(&self) -> &str {
+            "var-mock"
+        }
+    }
+
+    fn one_chunk() -> MockCapture {
+        MockCapture {
+            chunks: vec![AudioChunk {
+                samples: vec![0; 160],
+                is_final: true,
+            }],
+            i: 0,
+        }
+    }
+
+    proptest! {
+        /// Fuzz injection end to end: arbitrary transcripts (empty,
+        /// unicode, huge) flow capture to injection verbatim through
+        /// passthrough, exactly once per session. A replayed session
+        /// injects nothing and reports DuplicateEffect.
+        #[test]
+        fn arbitrary_transcripts_inject_exactly_once(
+            text in "[\\s\\S]{0,500}",
+            session in any::<u128>(),
+        ) {
+            let stt = VarStt(text.clone());
+            let inject = MockInject {
+                seen: Default::default(),
+                removed: Default::default(),
+            };
+            let reg = TicketRegistry::new();
+            let id = SessionId::new(session);
+            let out = run_once(
+                &mut one_chunk(),
+                &stt,
+                &PassthroughCleanup,
+                &inject,
+                &reg,
+                id,
+            )
+            .expect("fuzzed run failed");
+            prop_assert_eq!(&out.raw_text, &text);
+            prop_assert_eq!(&out.cleaned_text, &text);
+            let seen = inject.seen.lock().unwrap().clone();
+            prop_assert_eq!(seen.as_slice(), [text]);
+
+            let err = run_once(
+                &mut one_chunk(),
+                &stt,
+                &PassthroughCleanup,
+                &inject,
+                &reg,
+                id,
+            )
+            .unwrap_err();
+            prop_assert!(matches!(err, crate::CoreError::DuplicateEffect(_)));
+            prop_assert_eq!(inject.seen.lock().unwrap().len(), 1);
+        }
     }
 }
