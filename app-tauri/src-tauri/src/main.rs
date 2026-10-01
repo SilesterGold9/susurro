@@ -1374,6 +1374,15 @@ fn main() {
             }
             Ok(())
         })
+        .on_window_event(|window, event| {
+            // Tray app behavior: closing a window hides it instead of
+            // destroying it, so tray entries always have a window to
+            // show. Quit stays on the tray menu.
+            if let tauri::WindowEvent::CloseRequested { api, .. } = event {
+                let _ = window.hide();
+                api.prevent_close();
+            }
+        })
         .run(tauri::generate_context!())
         .expect("susurro failed to start");
 }

@@ -4,9 +4,21 @@
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
     <title>Susurro</title>
+    <style>
+      html, body { margin: 0; padding: 0; background: #f6f4ed; }
+      #boot {
+        display: flex;
+        align-items: center;
+        justify-content: center;
+        height: 100vh;
+        font: 600 15px Inter, system-ui, sans-serif;
+        color: #1b1a17;
+        opacity: 0.7;
+      }
+    </style>
   </head>
   <body>
-    <div id="root"></div>
+    <div id="root"><div id="boot">susurro<span style="color:#d85a30">,</span> loading</div></div>
     <script type="module" src="/src/main.tsx"></script>
   </body>
 </html>
