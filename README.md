@@ -13,7 +13,7 @@ AppImage / .deb (Linux), MSI plus NSIS setup (Windows), plus standalone `susurro
 
 ```sh
 # Linux quick start
-./Susurro_<version>_amd64.AppImage
+./Susurro_1.0.0_amd64.AppImage
 ```
 
 The app needs whisper.cpp (`whisper-cli`), a whisper model, and (for
