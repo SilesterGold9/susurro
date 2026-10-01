@@ -713,6 +713,32 @@ fn remove_word(phrase: String) -> Result<(), String> {
     store.remove(&phrase).map_err(|e| e.to_string())
 }
 
+/// Erase user data for a fresh start (onboarding plan): history,
+/// events, tickets, dictionary, privacy additions, profiles, and
+/// snippets. Settings and models survive.
+#[tauri::command]
+fn wipe_data() -> Result<String, String> {
+    let counts = susurro_storage::wipe_user_data(&shared_db_path()).map_err(|e| e.to_string())?;
+    let total =
+        counts.history + counts.events + counts.tickets + counts.dictionary + counts.privacy + counts.profiles + counts.snippets;
+    Ok(format!(
+        "erased {total} rows ({} sessions, {} events, {} phrases, {} snippets).",
+        counts.history, counts.events, counts.dictionary, counts.snippets
+    ))
+}
+
+/// Reopen the onboarding window (Help page replay entry).
+#[tauri::command]
+fn show_onboarding(app: AppHandle) -> Result<(), String> {
+    if let Some(w) = app.get_webview_window("onboarding") {
+        w.show().map_err(|e| e.to_string())?;
+        let _ = w.set_focus();
+        Ok(())
+    } else {
+        Err("no onboarding window in this build.".into())
+    }
+}
+
 #[derive(Clone, Serialize)]
 struct HistoryRow {
     session: String,
@@ -1421,6 +1447,8 @@ fn main() {
             list_dictionary,
             save_word,
             remove_word,
+            wipe_data,
+            show_onboarding,
             onboarding_status,
             requirements_status,
             download_model,

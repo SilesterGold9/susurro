@@ -15,6 +15,14 @@ export default function HelpPage() {
     setBusy(false);
   }
 
+  async function replay() {
+    try {
+      await invoke("show_onboarding");
+    } catch (e) {
+      setDoctor(`Couldn't reopen setup. ${e}`);
+    }
+  }
+
   return (
     <div className="flow-page">
       <h1 className="flow-title">Help</h1>
@@ -32,6 +40,9 @@ export default function HelpPage() {
         <div className="row">
           <button className="flow-dark" onClick={run} disabled={busy}>
             {busy ? "checking..." : "Run doctor"}
+          </button>
+          <button className="flow-mini" onClick={replay} aria-label="replay setup">
+            Replay setup
           </button>
         </div>
       </div>

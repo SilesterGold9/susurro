@@ -147,6 +147,13 @@ enum Cmd {
     /// Verify the whisper model checksum (trust on first use, compare
     /// after). Fails when the file is missing or corrupted.
     ModelCheck,
+    /// Erase user data: history, events, tickets, dictionary,
+    /// privacy additions, profiles, snippets. Needs --yes.
+    Wipe {
+        /// Confirm the wipe. Without it, prints what would go.
+        #[arg(long, default_value_t = false)]
+        yes: bool,
+    },
     /// Add a phrase to the custom dictionary (whisper prompt boost).
     DictAdd { phrase: String },
     /// Remove a phrase from the custom dictionary.
@@ -321,6 +328,7 @@ fn main() -> anyhow::Result<()> {
         Cmd::History { limit } => show_history(limit),
         Cmd::Stats => show_stats(),
         Cmd::ModelCheck => model_check(),
+        Cmd::Wipe { yes } => wipe(yes),
         Cmd::DictAdd { phrase } => dict_add(&phrase),
         Cmd::DictRemove { phrase } => dict_remove(&phrase),
         Cmd::DictList => dict_list(),
@@ -1761,6 +1769,27 @@ fn model_check() -> anyhow::Result<()> {
         }
         Err(e) => anyhow::bail!("model checksum unverified: {e}"),
     }
+}
+
+/// Erase user data for a fresh start. Without --yes, prints what
+/// would go and changes nothing.
+fn wipe(yes: bool) -> anyhow::Result<()> {
+    if !yes {
+        println!("would erase: history, events, tickets, dictionary, privacy additions, profiles, snippets.");
+        println!("settings and models survive. Rerun with --yes to confirm.");
+        return Ok(());
+    }
+    let counts = susurro_storage::wipe_user_data(&db_path())
+        .map_err(|e| anyhow::anyhow!("Couldn't wipe: {e}"))?;
+    let total = counts.history
+        + counts.events
+        + counts.tickets
+        + counts.dictionary
+        + counts.privacy
+        + counts.profiles
+        + counts.snippets;
+    println!("erased {total} rows. Settings and models kept.");
+    Ok(())
 }
 
 /// Usage plus latency stats (v0.9.0, issue 43): the user-facing

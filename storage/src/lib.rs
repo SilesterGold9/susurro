@@ -400,7 +400,39 @@ impl SqliteSnippets {
     }
 }
 
-/// Per-app local-only policy list (v0.3.0, issue 21).
+/// Erase user data for a fresh start (onboarding plan): history,
+/// session events, tickets, dictionary, privacy additions, format
+/// profiles, and snippets. Settings kv and app preferences survive.
+/// Privacy defaults reseed on next open. Returns rows removed per
+/// table so the UI can say what went away.
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub struct WipeCounts {
+    pub history: u64,
+    pub events: u64,
+    pub tickets: u64,
+    pub dictionary: u64,
+    pub privacy: u64,
+    pub profiles: u64,
+    pub snippets: u64,
+}
+
+pub fn wipe_user_data(path: &std::path::Path) -> Result<WipeCounts, CoreError> {
+    let conn = open_db(path)?;
+    let clear = |table: &str| -> Result<u64, CoreError> {
+        conn.execute(&format!("DELETE FROM {table}"), [])
+            .map(|n| n as u64)
+            .map_err(|e| CoreError::Storage(e.to_string()))
+    };
+    Ok(WipeCounts {
+        history: clear("history")?,
+        events: clear("session_events")?,
+        tickets: clear("tickets")?,
+        dictionary: clear("dictionary")?,
+        privacy: clear("privacy_apps")?,
+        profiles: clear("app_profiles")?,
+        snippets: clear("snippets")?,
+    })
+}
 /// Mirrors SqliteDictionary. Defaults seed on first open so the list
 /// stays visible and removable. Matching lives in core PrivacyPolicy.
 pub struct SqlitePrivacy {
@@ -785,6 +817,30 @@ mod tests {
         assert_eq!(recent.len(), 1);
         assert_eq!(recent[0].raw_text, "other");
         h.remove(susurro_core::SessionId::new(999)).unwrap();
+        let _ = std::fs::remove_file(&p);
+    }
+
+    #[test]
+    fn wipe_user_data_clears_everything() {
+        let p = tmp_path("wipe");
+        let mut h = SqliteHistory::open(&p).unwrap();
+        h.upsert(entry(1, "hello")).unwrap();
+        SqliteDictionary::open(&p).unwrap().add("word").unwrap();
+        SqliteSnippets::open(&p)
+            .unwrap()
+            .set("hi", "hello")
+            .unwrap();
+        let counts = wipe_user_data(&p).unwrap();
+        assert_eq!(counts.history, 1);
+        assert_eq!(counts.dictionary, 1);
+        assert_eq!(counts.snippets, 1);
+        assert!(SqliteHistory::open(&p)
+            .unwrap()
+            .recent(10)
+            .unwrap()
+            .is_empty());
+        // Second wipe converges to zeros.
+        assert_eq!(wipe_user_data(&p).unwrap(), WipeCounts::default());
         let _ = std::fs::remove_file(&p);
     }
 

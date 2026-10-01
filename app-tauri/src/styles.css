@@ -21,17 +21,8 @@ html, body {
 }
 html { background: transparent; }
 #root { background: transparent; }
-/* Brand wordmark: same stack and spacing as the susurro-wordmark.svg
-   master (Inter, Liberation Sans, Arial; bold; letter-spacing -2 at
-   116px scale, proportional here), mandatory coral comma. */
-.brand-wordmark {
-  font-family: Inter, "Liberation Sans", Arial, system-ui, sans-serif;
-  font-weight: 700;
-  font-size: 20px;
-  letter-spacing: -0.35px;
-  margin: 0 0 4px;
-}
-.brand-wordmark .comma { color: var(--coral); }
+/* Brand wordmark now lives in the shell sidebar (.flow-brand).
+   The old standalone wordmark rules were removed with it. */
 
 /* Floating pill: the window is exactly 360x64, so the pill is centered
    in the viewport (symmetric gutters) and its shadow stays small enough

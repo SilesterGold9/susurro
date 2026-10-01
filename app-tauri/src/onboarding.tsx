@@ -55,6 +55,7 @@ export default function OnboardingView() {
   const [testOut, setTestOut] = useState<TestResult | null>(null);
   const [busy, setBusy] = useState("");
   const [note, setNote] = useState("");
+  const [confirmWipe, setConfirmWipe] = useState(false);
   const [display, setDisplay] = useState({ high_contrast: false, announce: true });
   const [reqs, setReqs] = useState<Requirements | null>(null);
   const [pct, setPct] = useState<number | null>(null);
@@ -149,6 +150,23 @@ export default function OnboardingView() {
       setNote(`Couldn't finish setup. ${e}`);
       setBusy("");
     }
+  }
+
+  async function wipe() {
+    if (!confirmWipe) {
+      setConfirmWipe(true);
+      return;
+    }
+    setBusy("wipe");
+    try {
+      const msg = await invoke<string>("wipe_data");
+      setNote(msg);
+      setConfirmWipe(false);
+      await refresh();
+    } catch (e) {
+      setNote(`Couldn't wipe data. ${e}`);
+    }
+    setBusy("");
   }
 
   return (
@@ -301,6 +319,30 @@ export default function OnboardingView() {
             </button>
             <button className="flow-dark" onClick={finish} disabled={busy === "finish"}>
               {busy === "finish" ? "saving..." : "start dictating"}
+            </button>
+          </div>
+        </div>
+      )}
+
+      {step === 4 && (
+        <div className="flow-card flow-pad flow-sec">
+          <h3 className="flow-h3">Your data stays here</h3>
+          <div className="flow-sub">
+            Transcripts, words, and styles never leave this machine. Erase
+            them any time; settings and models survive.
+          </div>
+          <div className="row">
+            <button
+              className="flow-mini"
+              onClick={wipe}
+              disabled={busy === "wipe"}
+              aria-label="erase dictation data"
+            >
+              {busy === "wipe"
+                ? "erasing..."
+                : confirmWipe
+                  ? "click again to confirm erase"
+                  : "erase my data"}
             </button>
           </div>
         </div>

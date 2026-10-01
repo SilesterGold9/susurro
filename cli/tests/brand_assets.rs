@@ -62,12 +62,13 @@ fn bundle_and_tray_icons_exist_at_size() {
 
 #[test]
 fn settings_wordmark_carries_coral_comma() {
-    let tsx = std::fs::read_to_string(repo_root().join("app-tauri/src/settings.tsx")).unwrap();
-    assert!(tsx.contains("className=\"brand-wordmark\""));
+    // The wordmark lives in the shell sidebar since the Flow rebuild.
+    let tsx = std::fs::read_to_string(repo_root().join("app-tauri/src/shell.tsx")).unwrap();
+    assert!(tsx.contains("className=\"flow-brand\""));
     assert!(tsx.contains("aria-label=\"susurro,\""));
     assert!(tsx.contains("className=\"comma\""));
     let css = std::fs::read_to_string(repo_root().join("app-tauri/src/styles.css")).unwrap();
-    assert!(css.contains(".brand-wordmark .comma"));
+    assert!(css.contains(".flow-brand .comma"));
     assert!(css.contains("--coral"));
     assert!(!css.contains(".wordmark {"), "dead serif rule came back");
 }
