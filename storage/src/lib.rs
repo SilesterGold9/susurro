@@ -324,14 +324,10 @@ impl SqliteDictionary {
     }
 }
 
-/// Spoken shortcuts (UI clone): saying the trigger injects the
-/// expansion. Storage plus CRUD only; the expansion engine that
-/// rewrites transcripts is a follow-up.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct Snippet {
-    pub trigger: String,
-    pub expansion: String,
-}
+/// Spoken shortcuts (issue 55): saying the trigger injects the
+/// expansion. Shape lives in core so the pipeline matches on the
+/// same type storage persists; this crate only reads and writes rows.
+pub use susurro_core::Snippet;
 
 pub struct SqliteSnippets {
     conn: std::sync::Mutex<rusqlite::Connection>,
@@ -345,20 +341,14 @@ impl SqliteSnippets {
     }
 
     pub fn set(&self, trigger: &str, expansion: &str) -> Result<(), CoreError> {
-        let (trigger, expansion) = (trigger.trim(), expansion.trim());
-        if trigger.is_empty() {
-            return Err(CoreError::Storage("empty trigger".into()));
-        }
-        if expansion.is_empty() {
-            return Err(CoreError::Storage("empty expansion".into()));
-        }
+        let snippet = susurro_core::Snippet::new(trigger, expansion).map_err(CoreError::Storage)?;
         self.conn
             .lock()
             .map_err(|e| CoreError::Storage(format!("db lock poisoned: {e}")))?
             .execute(
                 "INSERT INTO snippets (trigger, expansion) VALUES (?1, ?2)
                  ON CONFLICT(trigger) DO UPDATE SET expansion = excluded.expansion",
-                rusqlite::params![trigger.to_lowercase(), expansion],
+                rusqlite::params![snippet.trigger, snippet.expansion],
             )
             .map_err(|e| CoreError::Storage(e.to_string()))?;
         Ok(())

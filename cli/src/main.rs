@@ -1121,6 +1121,7 @@ fn listen_once(mock_text: &str) -> anyhow::Result<()> {
         partial_calls: Default::default(),
     };
     let tickets = TicketRegistry::new();
+    let snippets = load_snippets();
     let out = Pipeline::run_once(
         &mut cap,
         &stt,
@@ -1128,13 +1129,18 @@ fn listen_once(mock_text: &str) -> anyhow::Result<()> {
         &StdoutInjector,
         &tickets,
         SessionId::generate(),
+        &snippets,
     )
     .map_err(|e| anyhow::anyhow!("{e}"))?;
     if is_scratch_that(&out.raw_text) || is_scratch_that(&out.cleaned_text) {
         eprintln!("scratch that heard. Undoing last session.");
         return undo_last_session(&StdoutInjector);
     }
+    if let Some(trigger) = out.snippet_trigger.as_deref() {
+        eprintln!("snippet: '{trigger}' expands.");
+    }
     eprintln!("raw: {}", out.raw_text);
+    eprintln!("cleaned: {}", out.cleaned_text);
     Ok(())
 }
 
@@ -1458,6 +1464,11 @@ fn run_utterance(opts: &ListenOpts, tickets: &TicketRegistry) -> anyhow::Result<
         other => anyhow::bail!("Unknown --cleanup '{other}'. Use none, regex, or ollama."),
     };
 
+    // Snippets (issue 55): whole-utterance trigger after cleanup,
+    // before injection. Best-effort load so a broken db degrades to
+    // no snippets instead of blocking dictation.
+    let snippets = load_snippets();
+
     let out = Pipeline::run_staged(
         capture.as_mut(),
         stt,
@@ -1465,6 +1476,7 @@ fn run_utterance(opts: &ListenOpts, tickets: &TicketRegistry) -> anyhow::Result<
         inject,
         tickets,
         session,
+        &snippets,
         &|stage| {
             let name = match stage {
                 susurro_core::Stage::Transcribing => "transcribing",
@@ -1497,6 +1509,14 @@ fn run_utterance(opts: &ListenOpts, tickets: &TicketRegistry) -> anyhow::Result<
     cues.play(susurro_adapters_audio::Cue::Done);
     eprintln!("raw: {}", out.raw_text);
     eprintln!("cleaned: {}", out.cleaned_text);
+    if let Some(trigger) = out.snippet_trigger.as_deref() {
+        eprintln!("snippet: '{trigger}' expands.");
+        log_event(
+            session,
+            susurro_core::EventKind::Stage,
+            &format!("snippet:{trigger}"),
+        );
+    }
 
     // Scratch-that (v0.8.0, issue 39): the transcript is a command,
     // not dictation. Undo the previous session instead of injecting,
@@ -1935,6 +1955,24 @@ fn snippet_list() -> anyhow::Result<()> {
         }
     }
     Ok(())
+}
+
+/// Best-effort snippet load for the dictation path. A broken db
+/// degrades to no snippets; dictation continues with raw text.
+fn load_snippets() -> Vec<susurro_core::Snippet> {
+    match susurro_storage::SqliteSnippets::open(&db_path()) {
+        Ok(store) => match store.list() {
+            Ok(list) => list,
+            Err(e) => {
+                eprintln!("snippet store degraded: {e}");
+                Vec::new()
+            }
+        },
+        Err(e) => {
+            eprintln!("snippet store degraded: {e}");
+            Vec::new()
+        }
+    }
 }
 
 fn key_set(provider_name: &str, from_env: Option<&str>) -> anyhow::Result<()> {

@@ -1142,6 +1142,13 @@ fn run_dictation(
     };
     let mut capture = GuiCapture { pcm, done: false };
     let session = SessionId::generate();
+    // Snippets (issue 55): same whole-utterance match as the CLI.
+    // Best-effort load so a broken db degrades to plain dictation.
+    let snippets: Vec<susurro_core::Snippet> =
+        susurro_storage::SqliteSnippets::open(&shared_db_path())
+            .ok()
+            .and_then(|store| store.list().ok())
+            .unwrap_or_default();
     let out = Pipeline::run_staged(
         &mut capture,
         &stt,
@@ -1149,6 +1156,7 @@ fn run_dictation(
         &GuiInjector,
         tickets,
         session,
+        &snippets,
         &|stage| {
             *stage_now.lock().unwrap() = (stage, std::time::Instant::now());
             emit_progress(app, stage, susurro_core::progress_for(stage, 0));

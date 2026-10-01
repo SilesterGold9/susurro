@@ -4,13 +4,16 @@
 //! history write is a no-op (SQLite lands in v0.2.0).
 
 use crate::ports::{AudioCapturePort, SpeechToTextPort, TextInjectionPort, TextPostProcessorPort};
-use crate::{SessionId, State, Ticket, TicketRegistry};
+use crate::{SessionId, Snippet, State, Ticket, TicketRegistry};
 
 #[derive(Debug)]
 pub struct UtteranceResult {
     pub session: SessionId,
     pub raw_text: String,
     pub cleaned_text: String,
+    /// Trigger that expanded, if any. History keeps raw plus cleaned,
+    /// so the trigger stays noted without a schema change.
+    pub snippet_trigger: Option<String>,
 }
 
 pub struct PassthroughCleanup;
@@ -31,10 +34,14 @@ impl Pipeline {
         inject: &dyn TextInjectionPort,
         tickets: &TicketRegistry,
         session: SessionId,
+        snippets: &[Snippet],
     ) -> Result<UtteranceResult, crate::CoreError> {
-        run_once(capture, stt, cleanup, inject, tickets, session)
+        run_once(capture, stt, cleanup, inject, tickets, session, snippets)
     }
 
+    // Eight args is the port assembly shape (six ports plus session
+    // plus snippets); splitting it would scatter the call, not shrink it.
+    #[allow(clippy::too_many_arguments)]
     pub fn run_staged(
         capture: &mut dyn AudioCapturePort,
         stt: &dyn SpeechToTextPort,
@@ -42,9 +49,12 @@ impl Pipeline {
         inject: &dyn TextInjectionPort,
         tickets: &TicketRegistry,
         session: SessionId,
+        snippets: &[Snippet],
         on_stage: &dyn Fn(crate::Stage),
     ) -> Result<UtteranceResult, crate::CoreError> {
-        run_staged(capture, stt, cleanup, inject, tickets, session, on_stage)
+        run_staged(
+            capture, stt, cleanup, inject, tickets, session, snippets, on_stage,
+        )
     }
 }
 
@@ -59,13 +69,25 @@ pub fn run_once(
     inject: &dyn TextInjectionPort,
     tickets: &TicketRegistry,
     session: SessionId,
+    snippets: &[Snippet],
 ) -> Result<UtteranceResult, crate::CoreError> {
-    run_staged(capture, stt, cleanup, inject, tickets, session, &|_| {})
+    run_staged(
+        capture,
+        stt,
+        cleanup,
+        inject,
+        tickets,
+        session,
+        snippets,
+        &|_| {},
+    )
 }
 
 /// Staged variant: `on_stage` fires at each post-capture boundary so
 /// progress UI can track transcribing, polishing, and injecting.
 /// Same behavior and guarantees as `run_once`.
+// Eight args is the port assembly shape; see the method above.
+#[allow(clippy::too_many_arguments)]
 pub fn run_staged(
     capture: &mut dyn AudioCapturePort,
     stt: &dyn SpeechToTextPort,
@@ -73,6 +95,7 @@ pub fn run_staged(
     inject: &dyn TextInjectionPort,
     tickets: &TicketRegistry,
     session: SessionId,
+    snippets: &[Snippet],
     on_stage: &dyn Fn(crate::Stage),
 ) -> Result<UtteranceResult, crate::CoreError> {
     let mut state = State::Idle;
@@ -107,9 +130,15 @@ pub fn run_staged(
 
     state = state.transition_to(State::Injecting)?;
     on_stage(crate::Stage::Injecting);
+    // Snippets (issue 55): whole-utterance exact match after cleanup,
+    // before injection. Partial input never expands.
+    let (final_text, snippet_trigger) = match crate::find_expansion(&cleaned, snippets) {
+        Some((trigger, expansion)) => (expansion.to_string(), Some(trigger.to_string())),
+        None => (cleaned.clone(), None),
+    };
     let ticket = Ticket::new(session, "inject");
     tickets.claim_once(&ticket)?;
-    inject.inject(&cleaned, &ticket)?;
+    inject.inject(&final_text, &ticket)?;
 
     state = state.transition_to(State::Idle)?;
     debug_assert_eq!(state, State::Idle);
@@ -117,7 +146,8 @@ pub fn run_staged(
     Ok(UtteranceResult {
         session,
         raw_text: transcript.text,
-        cleaned_text: cleaned,
+        cleaned_text: final_text,
+        snippet_trigger,
     })
 }
 
@@ -196,9 +226,11 @@ mod tests {
             &inject,
             &reg,
             SessionId::new(7),
+            &[],
         )
         .unwrap();
         assert_eq!(out.cleaned_text, "hello world");
+        assert!(out.snippet_trigger.is_none());
         assert_eq!(inject.seen.lock().unwrap().len(), 1);
     }
 
@@ -227,6 +259,7 @@ mod tests {
             &inject,
             &reg,
             session,
+            &[],
         )
         .unwrap_err();
         assert!(matches!(err, crate::CoreError::DuplicateEffect(_)));
@@ -259,6 +292,7 @@ mod tests {
             &inject,
             &TicketRegistry::new(),
             SessionId::new(11),
+            &[],
         )
         .unwrap();
         assert_eq!(out.cleaned_text, "hello world");
@@ -287,6 +321,7 @@ mod tests {
             &inject,
             &TicketRegistry::new(),
             SessionId::new(13),
+            &[],
             &|s| seen.borrow_mut().push(s),
         )
         .unwrap();
@@ -298,6 +333,83 @@ mod tests {
                 crate::Stage::Injecting
             ]
         );
+    }
+
+    fn snippet_list() -> Vec<crate::Snippet> {
+        vec![
+            crate::Snippet::new("my email", "me@example.com").unwrap(),
+            crate::Snippet::new("standup link", "https://meet.example.com/daily").unwrap(),
+        ]
+    }
+
+    struct TriggerStt(&'static str);
+    impl SpeechToTextPort for TriggerStt {
+        fn transcribe(&self, _pcm: &[i16]) -> Result<crate::ports::Transcript, crate::CoreError> {
+            Ok(crate::ports::Transcript {
+                text: self.0.into(),
+                is_partial: false,
+            })
+        }
+        fn model_name(&self) -> &str {
+            "trigger-mock"
+        }
+    }
+
+    fn run_with(text: &'static str, snippets: &[crate::Snippet]) -> (UtteranceResult, Vec<String>) {
+        let mut cap = MockCapture {
+            chunks: vec![AudioChunk {
+                samples: vec![0; 160],
+                is_final: true,
+            }],
+            i: 0,
+        };
+        let inject = MockInject {
+            seen: Default::default(),
+            removed: Default::default(),
+        };
+        let out = run_once(
+            &mut cap,
+            &TriggerStt(text),
+            &PassthroughCleanup,
+            &inject,
+            &TicketRegistry::new(),
+            SessionId::generate(),
+            snippets,
+        )
+        .unwrap();
+        let seen = inject.seen.lock().unwrap().clone();
+        (out, seen)
+    }
+
+    #[test]
+    fn snippet_trigger_injects_expansion() {
+        let (out, seen) = run_with("my email", &snippet_list());
+        assert_eq!(seen.as_slice(), ["me@example.com"]);
+        assert_eq!(out.raw_text, "my email");
+        assert_eq!(out.cleaned_text, "me@example.com");
+        assert_eq!(out.snippet_trigger.as_deref(), Some("my email"));
+    }
+
+    #[test]
+    fn snippet_match_tolerates_case_and_punctuation() {
+        let (out, seen) = run_with("My Email.", &snippet_list());
+        assert_eq!(seen.as_slice(), ["me@example.com"]);
+        assert_eq!(out.snippet_trigger.as_deref(), Some("my email"));
+    }
+
+    #[test]
+    fn snippet_partial_stays_dictation() {
+        let (out, seen) = run_with("send my email please", &snippet_list());
+        assert_eq!(seen.as_slice(), ["send my email please"]);
+        assert_eq!(out.cleaned_text, "send my email please");
+        assert!(out.snippet_trigger.is_none());
+    }
+
+    #[test]
+    fn empty_snippets_leave_text_untouched() {
+        let (out, seen) = run_with("my email", &[]);
+        assert_eq!(seen.as_slice(), ["my email"]);
+        assert!(out.snippet_trigger.is_none());
     }
 }
 
@@ -355,6 +467,7 @@ mod property_tests {
                 &inject,
                 &reg,
                 id,
+                &[],
             )
             .expect("fuzzed run failed");
             prop_assert_eq!(&out.raw_text, &text);
@@ -369,6 +482,7 @@ mod property_tests {
                 &inject,
                 &reg,
                 id,
+                &[],
             )
             .unwrap_err();
             prop_assert!(matches!(err, crate::CoreError::DuplicateEffect(_)));

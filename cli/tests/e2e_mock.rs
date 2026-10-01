@@ -27,6 +27,7 @@ fn mock_e2e_injects_transcript_once() {
         &inject,
         &tickets,
         SessionId::new(0xbeef),
+        &[],
     )
     .expect("pipeline runs");
 
@@ -52,6 +53,7 @@ fn double_hotkey_cannot_double_inject() {
             &inject,
             &tickets,
             session,
+            &[],
         );
         // First succeeds, second is blocked by the ticket.
         if inject.seen.lock().unwrap().is_empty() {
