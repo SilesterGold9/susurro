@@ -125,6 +125,9 @@ enum Cmd {
         #[arg(long, default_value_t = 10)]
         limit: usize,
     },
+    /// Show usage stats: per-day words, streak, top apps, dictionary
+    /// hits, plus end-to-end latency percentiles.
+    Stats,
     /// Add a phrase to the custom dictionary (whisper prompt boost).
     DictAdd { phrase: String },
     /// Remove a phrase from the custom dictionary.
@@ -281,6 +284,7 @@ fn main() -> anyhow::Result<()> {
             Ok(())
         }
         Cmd::History { limit } => show_history(limit),
+        Cmd::Stats => show_stats(),
         Cmd::DictAdd { phrase } => dict_add(&phrase),
         Cmd::DictRemove { phrase } => dict_remove(&phrase),
         Cmd::DictList => dict_list(),
@@ -1400,6 +1404,9 @@ fn run_utterance(opts: &ListenOpts, tickets: &TicketRegistry) -> anyhow::Result<
                 cleaned_text: Some(out.cleaned_text.clone()),
                 provider,
                 latency_ms,
+                app: focused.clone(),
+                // The db owns the timestamp; the field rides back on read.
+                created_at: 0,
             }) {
                 eprintln!("history write degraded: {e}");
             }
@@ -1581,6 +1588,57 @@ fn restore(session: &str) -> anyhow::Result<()> {
         "restored raw transcript ({} chars).",
         entry.raw_text.chars().count()
     );
+    Ok(())
+}
+
+/// Usage plus latency stats (v0.9.0, issue 43): the user-facing
+/// half (words, streak, top apps, dictionary hits) beside the
+/// engineering half (end-to-end latency percentiles).
+fn show_stats() -> anyhow::Result<()> {
+    let history = susurro_storage::SqliteHistory::open(&db_path())
+        .map_err(|e| anyhow::anyhow!("Couldn't open history: {e}"))?;
+    let rows = history
+        .stat_rows(100_000)
+        .map_err(|e| anyhow::anyhow!("Couldn't read history: {e}"))?;
+    if rows.is_empty() {
+        println!("no history yet. Dictate something first.");
+        return Ok(());
+    }
+    let dict = susurro_storage::SqliteDictionary::open(&db_path())
+        .map(|d| d.list().unwrap_or_default())
+        .unwrap_or_default();
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs() as i64)
+        .unwrap_or(0);
+    let s = susurro_core::summarize(&rows, &dict, susurro_core::day_index(now));
+    println!("sessions: {} ({} words dictated)", s.entries, s.words);
+    println!("polished: {} entries cleaned up by the chain", s.polished);
+    println!(
+        "dictionary: {} hits across {} custom phrases",
+        s.dict_hits,
+        dict.len()
+    );
+    println!("streak: {} days", s.streak_days);
+    if s.top_apps.is_empty() {
+        println!("top apps: unknown (app tracking started with this version)");
+    } else {
+        let apps = s
+            .top_apps
+            .iter()
+            .map(|(a, n)| format!("{a} {n}"))
+            .collect::<Vec<_>>()
+            .join(", ");
+        println!("top apps: {apps}");
+    }
+    println!(
+        "latency: p50 {}ms, p95 {}ms, p99 {}ms end to end",
+        s.p50_ms, s.p95_ms, s.p99_ms
+    );
+    println!("last days (words):");
+    for d in &s.days {
+        println!("- {}: {}", d.label, d.words);
+    }
     Ok(())
 }
 

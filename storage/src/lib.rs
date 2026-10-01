@@ -90,6 +90,10 @@ fn open_db(path: &std::path::Path) -> Result<rusqlite::Connection, CoreError> {
           );",
     )
     .map_err(|e| CoreError::Storage(format!("Couldn't migrate db: {e}")))?;
+    // v0.9.0 (issue 43): per-app usage needs the focused app per row.
+    // Old dbs already have the table, so a duplicate-column error
+    // just means the migration already ran.
+    let _ = conn.execute("ALTER TABLE history ADD COLUMN app TEXT", []);
     Ok(conn)
 }
 
@@ -116,7 +120,7 @@ impl SqliteHistory {
             .map_err(|e| CoreError::Storage(format!("db lock poisoned: {e}")))?;
         let mut stmt = conn
             .prepare(
-                "SELECT session, raw_text, cleaned_text, provider, latency_ms
+                "SELECT session, raw_text, cleaned_text, provider, latency_ms, app, created_at
                  FROM history ORDER BY created_at DESC, rowid DESC LIMIT ?",
             )
             .map_err(|e| CoreError::Storage(e.to_string()))?;
@@ -130,6 +134,45 @@ impl SqliteHistory {
                     cleaned_text: row.get(2)?,
                     provider: row.get(3)?,
                     latency_ms: row.get::<_, i64>(4)? as u64,
+                    app: row.get(5)?,
+                    created_at: row.get(6)?,
+                })
+            })
+            .map_err(|e| CoreError::Storage(e.to_string()))?;
+        let out = rows
+            .collect::<Result<Vec<_>, _>>()
+            .map_err(|e| CoreError::Storage(e.to_string()));
+        out
+    }
+
+    /// Every row for usage stats (v0.9.0, issue 43), oldest first.
+    /// Bounded so a huge history cannot OOM the stats view.
+    // allow(let_and_return): binding forces the row iterator to drop
+    // before the statement guard (borrowck E0597 otherwise).
+    #[allow(clippy::let_and_return)]
+    pub fn stat_rows(&self, limit: usize) -> Result<Vec<HistoryEntry>, CoreError> {
+        let conn = self
+            .conn
+            .lock()
+            .map_err(|e| CoreError::Storage(format!("db lock poisoned: {e}")))?;
+        let mut stmt = conn
+            .prepare(
+                "SELECT session, raw_text, cleaned_text, provider, latency_ms, app, created_at
+                 FROM history ORDER BY created_at ASC, rowid ASC LIMIT ?",
+            )
+            .map_err(|e| CoreError::Storage(e.to_string()))?;
+        let rows = stmt
+            .query_map([limit as i64], |row| {
+                let session_hex: String = row.get(0)?;
+                let session = u128::from_str_radix(&session_hex, 16).unwrap_or(0);
+                Ok(HistoryEntry {
+                    session: susurro_core::SessionId::new(session),
+                    raw_text: row.get(1)?,
+                    cleaned_text: row.get(2)?,
+                    provider: row.get(3)?,
+                    latency_ms: row.get::<_, i64>(4)? as u64,
+                    app: row.get(5)?,
+                    created_at: row.get(6)?,
                 })
             })
             .map_err(|e| CoreError::Storage(e.to_string()))?;
@@ -151,13 +194,14 @@ impl HistoryStorePort for SqliteHistory {
             .lock()
             .map_err(|e| CoreError::Storage(format!("db lock poisoned: {e}")))?;
         conn.execute(
-                "INSERT INTO history (session, raw_text, cleaned_text, provider, latency_ms, created_at)
-                 VALUES (?1, ?2, ?3, ?4, ?5, ?6)
+                "INSERT INTO history (session, raw_text, cleaned_text, provider, latency_ms, created_at, app)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)
                  ON CONFLICT(session) DO UPDATE SET
                    raw_text = excluded.raw_text,
                    cleaned_text = excluded.cleaned_text,
                    provider = excluded.provider,
-                   latency_ms = excluded.latency_ms",
+                   latency_ms = excluded.latency_ms,
+                   app = excluded.app",
                 rusqlite::params![
                     format!("{:032x}", entry.session.0),
                     entry.raw_text,
@@ -165,6 +209,7 @@ impl HistoryStorePort for SqliteHistory {
                     entry.provider,
                     entry.latency_ms as i64,
                     now,
+                    entry.app,
                 ],
             )
             .map_err(|e| CoreError::Storage(e.to_string()))?;
@@ -639,6 +684,8 @@ mod tests {
             cleaned_text: Some(format!("{raw}!")),
             provider: "local".into(),
             latency_ms: 42,
+            app: None,
+            created_at: 0,
         }
     }
 

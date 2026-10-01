@@ -98,6 +98,11 @@ pub struct HistoryEntry {
     pub cleaned_text: Option<String>,
     pub provider: String,
     pub latency_ms: u64,
+    /// Focused app at dictation time, if known (v0.9.0, issue 43).
+    pub app: Option<String>,
+    /// Unix seconds when the row was first stored. Zero means unknown
+    /// (pre-43 rows and test fixtures); day math skips those rows.
+    pub created_at: i64,
 }
 
 pub trait HistoryStorePort: Send + Sync {
@@ -165,6 +170,8 @@ mod tests {
             cleaned_text: cleaned.map(|c| c.into()),
             provider: "local".into(),
             latency_ms: 1,
+            app: None,
+            created_at: 0,
         }
     }
 

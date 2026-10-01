@@ -13,6 +13,7 @@ pub mod privacy;
 pub mod session;
 pub mod stages;
 pub mod state;
+pub mod stats;
 
 pub use error::CoreError;
 pub use event_log::{now_ms, EventKind, SessionEvent};
@@ -22,3 +23,4 @@ pub use privacy::{PrivacyPolicy, DEFAULT_BLOCKLIST};
 pub use session::{SessionId, Ticket, TicketRegistry};
 pub use stages::{progress_for, Stage};
 pub use state::State;
+pub use stats::{day_index, day_label, percentile, summarize, DayCount, Summary};

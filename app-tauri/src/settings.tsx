@@ -48,6 +48,20 @@ export interface FormatProfileRow {
   cleanup: string;
 }
 
+export interface UsageStats {
+  entries: number;
+  words: number;
+  polished: number;
+  dict_hits: number;
+  dict_phrases: number;
+  streak_days: number;
+  top_apps: { app: string; sessions: number }[];
+  p50_ms: number;
+  p95_ms: number;
+  p99_ms: number;
+  days: { label: string; words: number }[];
+}
+
 export default function SettingsView() {
   const [s, setS] = useState<Settings>(DEFAULTS);
   const [saved, setSaved] = useState(false);
@@ -60,6 +74,8 @@ export default function SettingsView() {
   const [profileApp, setProfileApp] = useState("");
   const [profileStyle, setProfileStyle] = useState("formal");
   const [profileNote, setProfileNote] = useState("");
+  const [stats, setStats] = useState<UsageStats | null>(null);
+  const [statsNote, setStatsNote] = useState("");
 
   useEffect(() => {
     invoke<Settings>("get_settings").then(setS).catch(() => {});
@@ -136,6 +152,15 @@ export default function SettingsView() {
       await loadProfiles();
     } catch (e) {
       setProfileNote(`Couldn't remove profile. ${e}`);
+    }
+  }
+
+  async function loadStats() {
+    try {
+      setStats(await invoke<UsageStats>("get_stats"));
+      setStatsNote("");
+    } catch (e) {
+      setStatsNote(`Couldn't read stats. ${e}`);
     }
   }
 
@@ -368,6 +393,35 @@ export default function SettingsView() {
               </div>
             );
           })}
+        </div>
+      )}
+
+      <div className="field">
+        <label>Usage (words, streak, latency)</label>
+        <div className="row">
+          <button className="ghost" onClick={loadStats} aria-label="load usage stats">
+            load stats
+          </button>
+        </div>
+      </div>
+      {statsNote && <div className="update-note" aria-live={live}>{statsNote}</div>}
+      {stats && (
+        <div className="history">
+          <div className="mono">
+            {stats.entries} sessions | {stats.words} words | {stats.polished} polished |{" "}
+            {stats.dict_hits} dict hits ({stats.dict_phrases} phrases) | {stats.streak_days}d streak
+          </div>
+          <div className="sub">
+            latency p50 {stats.p50_ms}ms, p95 {stats.p95_ms}ms, p99 {stats.p99_ms}ms end to end.
+            {stats.top_apps.length
+              ? ` Top apps: ${stats.top_apps.map((t) => `${t.app} ${t.sessions}`).join(", ")}.`
+              : " Top apps: unknown yet."}
+          </div>
+          {stats.days.map((d) => (
+            <div key={d.label} className="mono">
+              {d.label}: {d.words} words
+            </div>
+          ))}
         </div>
       )}
     </div>

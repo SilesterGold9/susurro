@@ -247,6 +247,35 @@ fn save_format_profile(app: String, style: String) -> Result<(), String> {
     store.set(&app, style).map_err(|e| e.to_string())
 }
 
+/// Usage plus latency stats for the settings view (v0.9.0, issue 43).
+#[tauri::command]
+fn get_stats() -> Result<serde_json::Value, String> {
+    let history = susurro_storage::SqliteHistory::open(&shared_db_path())
+        .map_err(|e| e.to_string())?;
+    let rows = history.stat_rows(100_000).map_err(|e| e.to_string())?;
+    let dict = susurro_storage::SqliteDictionary::open(&shared_db_path())
+        .map(|d| d.list().unwrap_or_default())
+        .unwrap_or_default();
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs() as i64)
+        .unwrap_or(0);
+    let s = susurro_core::summarize(&rows, &dict, susurro_core::day_index(now));
+    Ok(serde_json::json!({
+        "entries": s.entries,
+        "words": s.words,
+        "polished": s.polished,
+        "dict_hits": s.dict_hits,
+        "dict_phrases": dict.len(),
+        "streak_days": s.streak_days,
+        "top_apps": s.top_apps.iter().map(|(a, n)| serde_json::json!({"app": a, "sessions": n})).collect::<Vec<_>>(),
+        "p50_ms": s.p50_ms,
+        "p95_ms": s.p95_ms,
+        "p99_ms": s.p99_ms,
+        "days": s.days.iter().map(|d| serde_json::json!({"label": d.label, "words": d.words})).collect::<Vec<_>>(),
+    }))
+}
+
 /// Remove an app formatting profile (falls back to the cleanup setting).
 #[tauri::command]
 fn remove_format_profile(app: String) -> Result<(), String> {
@@ -735,13 +764,14 @@ fn run_dictation(
         })
     };
     let mut capture = GuiCapture { pcm, done: false };
+    let session = SessionId::generate();
     let out = Pipeline::run_staged(
         &mut capture,
         &stt,
         cleanup,
         &GuiInjector,
         tickets,
-        SessionId::generate(),
+        session,
         &|stage| {
             *stage_now.lock().unwrap() = (stage, std::time::Instant::now());
             emit_progress(app, stage, susurro_core::progress_for(stage, 0));
@@ -767,10 +797,24 @@ fn run_dictation(
     cues.play(susurro_adapters_audio::Cue::Done);
 
     let result = UtteranceResult {
-        raw: out.raw_text,
-        cleaned: out.cleaned_text,
+        raw: out.raw_text.clone(),
+        cleaned: out.cleaned_text.clone(),
         latency_ms: t0.elapsed().as_millis() as u64,
     };
+    // Shared history with the CLI (v0.9.0, issue 43): GUI dictations
+    // feed the same stats and restore views. Best-effort, never blocks.
+    if let Ok(mut history) = susurro_storage::SqliteHistory::open(&shared_db_path()) {
+        use susurro_core::ports::HistoryStorePort;
+        let _ = history.upsert(susurro_core::ports::HistoryEntry {
+            session,
+            raw_text: out.raw_text,
+            cleaned_text: Some(out.cleaned_text),
+            provider: "local".into(),
+            latency_ms: result.latency_ms,
+            app: focused.clone(),
+            created_at: 0,
+        });
+    }
     let _ = app.emit("susurro://result", &result);
     emit_state(app, "done");
     Ok(result)
@@ -1048,6 +1092,7 @@ fn main() {
             test_dictation,
             hotkey_snippet,
             finish_onboarding,
+            get_stats,
             pill_drag_start,
             pill_drag_move
         ])

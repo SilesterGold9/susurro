@@ -165,6 +165,8 @@ pub fn check_history_upsert_converges(store: &mut dyn HistoryStorePort) {
         cleaned_text: None,
         provider: "contract".into(),
         latency_ms: 1,
+        app: None,
+        created_at: 0,
     };
     store.upsert(entry("one")).expect("first upsert failed");
     store.upsert(entry("two")).expect("second upsert failed");
