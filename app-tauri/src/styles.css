@@ -527,10 +527,27 @@ button.ghost {
 }
 .flow-sub { opacity: 0.65; font-size: 13px; margin-top: 8px; line-height: 1.5; }
 .flow-h3 { font-size: 16px; margin: 0 0 12px; }
+.flow-sec { margin-bottom: 18px; }
+.flow-label { display: block; font-size: 12px; opacity: 0.7; margin: 12px 0 4px; }
+.flow-label:first-child { margin-top: 0; }
+.flow-input {
+  width: 100%;
+  padding: 7px 10px;
+  border-radius: 8px;
+  border: 1px solid #0000002e;
+  background: #fffdf8;
+  color: inherit;
+  font: inherit;
+}
+.flow-input.mono, .flow-mono { font-family: var(--mono); }
+.flow-input.mono { font-size: 12px; }
+.flow-mono { font-size: 12px; white-space: pre-wrap; }
+.flow-check { display: flex; gap: 10px; align-items: center; margin: 10px 0; cursor: pointer; }
+.flow-check input { width: 16px; height: 16px; accent-color: var(--teal); flex: none; }
+.flow-onboard { max-width: 560px; margin: 0 auto; padding: clamp(18px, 3vw, 32px) clamp(16px, 3.5vw, 28px) 60px; }
 .flow-serif { font-family: Georgia, serif; font-size: 30px; font-weight: 500; }
 .flow-pick { cursor: pointer; text-align: left; font: inherit; color: inherit; width: 100%; }
 .flow-pick.picked { border: 2px solid #6d5bd0; }
-.flow-mono { font-family: var(--mono); font-size: 12px; white-space: pre-wrap; }
 .flow-bar-row { display: flex; align-items: center; gap: 10px; margin: 8px 0; }
 .flow-bar-label { width: 110px; flex: none; font-size: 13px; }
 .flow-bar-track { flex: 1; height: 8px; border-radius: 4px; background: #00000012; overflow: hidden; }

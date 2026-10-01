@@ -152,18 +152,16 @@ export default function OnboardingView() {
   }
 
   return (
-    <div className={`settings${display.high_contrast ? " high-contrast" : ""}`}>
-      <h1 className="brand-wordmark" aria-label="susurro,">
-        susurro<span className="comma" aria-hidden="true">,</span>
-      </h1>
-      <div className="sub">
+    <div className={`flow-onboard${display.high_contrast ? " high-contrast" : ""}`}>
+      <h1 className="flow-title">Welcome to susurro,</h1>
+      <div className="flow-sub">
         Setup, screen {step} of 4. No tutorial, no maze.
       </div>
 
       {step === 1 && (
-        <div className="field">
-          <label>1. Requirements, model, speed check</label>
-          <div className="sub">
+        <div className="flow-card flow-pad flow-sec">
+          <h3 className="flow-h3">1. Requirements, model, speed check</h3>
+          <div className="flow-sub">
             {reqs ? (
               <>
                 <div>
@@ -186,11 +184,11 @@ export default function OnboardingView() {
             )}
           </div>
           <div className="row">
-            <button className="ghost" onClick={refresh} aria-label="recheck requirements">
+            <button className="flow-mini" onClick={refresh} aria-label="recheck requirements">
               recheck
             </button>
           </div>
-          <div className="sub">
+          <div className="flow-sub">
             {status
               ? status.model_found
                 ? `model found: ${status.model_path}. Checksum ${status.model_checksum}.`
@@ -199,30 +197,30 @@ export default function OnboardingView() {
           </div>
           <div className="row">
             <button
-              className="primary"
+              className="flow-dark"
               onClick={download}
               disabled={busy === "model" || !!status?.model_found}
             >
               {busy === "model" ? "downloading..." : "download model"}
             </button>
-            <button className="ghost" onClick={runBench} disabled={busy === "bench"}>
+            <button className="flow-mini" onClick={runBench} disabled={busy === "bench"}>
               {busy === "bench" ? "measuring..." : "run speed check"}
             </button>
           </div>
           {pct !== null && (
-            <div className="sub" aria-live="polite">
+            <div className="flow-sub" aria-live="polite">
               downloading model: {pct}%.
             </div>
           )}
           {(bench || status?.tier) && (
-            <div className="sub">
+            <div className="flow-sub">
               {bench
                 ? `this machine: ${bench.tier} tier at ${bench.iters_per_sec} iters/s on ${bench.cores} cores${bench.persisted ? ", saved" : ", not saved"}.`
                 : `saved tier: ${status?.tier}.`}
             </div>
           )}
           <div className="row">
-            <button className="primary" onClick={() => setStep(2)}>
+            <button className="flow-dark" onClick={() => setStep(2)}>
               next
             </button>
           </div>
@@ -230,10 +228,10 @@ export default function OnboardingView() {
       )}
 
       {step === 2 && (
-        <div className="field">
-          <label>2. Pick the dictation hotkey</label>
+        <div className="flow-card flow-pad flow-sec">
+          <h3 className="flow-h3">2. Pick the dictation hotkey</h3>
           {HOTKEYS.map((h) => (
-            <div className="field row" key={h.name}>
+            <label className="flow-check" key={h.name}>
               <input
                 type="radio"
                 name="hotkey"
@@ -242,19 +240,19 @@ export default function OnboardingView() {
                 aria-label={h.label}
               />
               <span>{h.label}</span>
-            </div>
+            </label>
           ))}
-          <div className="sub">On Hyprland, add this line to hyprland.conf:</div>
-          <div className="history">
-            <pre className="mono" style={{ whiteSpace: "pre-wrap" }}>
+          <div className="flow-sub">On Hyprland, add this line to hyprland.conf:</div>
+          <div className="flow-card flow-sec">
+            <pre className="flow-mono" style={{ whiteSpace: "pre-wrap" }}>
               {snippet}
             </pre>
           </div>
           <div className="row">
-            <button className="ghost" onClick={() => setStep(1)}>
+            <button className="flow-mini" onClick={() => setStep(1)}>
               back
             </button>
-            <button className="primary" onClick={() => setStep(3)}>
+            <button className="flow-dark" onClick={() => setStep(3)}>
               next
             </button>
           </div>
@@ -262,27 +260,27 @@ export default function OnboardingView() {
       )}
 
       {step === 3 && (
-        <div className="field">
-          <label>3. Test dictation (6 seconds)</label>
-          <div className="sub">Press the button, speak, and the transcript lands here.</div>
+        <div className="flow-card flow-pad flow-sec">
+          <h3 className="flow-h3">3. Test dictation (6 seconds)</h3>
+          <div className="flow-sub">Press the button, speak, and the transcript lands here.</div>
           <div className="row">
-            <button className="primary" onClick={testMic} disabled={busy === "test"}>
+            <button className="flow-dark" onClick={testMic} disabled={busy === "test"}>
               {busy === "test" ? "listening..." : "speak now"}
             </button>
           </div>
           {testOut && (
-            <div className="history">
-              <div className="mono" style={{ whiteSpace: "pre-wrap" }}>
+            <div className="flow-card flow-sec">
+              <div className="flow-mono" style={{ whiteSpace: "pre-wrap" }}>
                 {testOut.cleaned || testOut.raw}
               </div>
-              <div className="sub">{testOut.latency_ms}ms end to end.</div>
+              <div className="flow-sub">{testOut.latency_ms}ms end to end.</div>
             </div>
           )}
           <div className="row">
-            <button className="ghost" onClick={() => setStep(2)}>
+            <button className="flow-mini" onClick={() => setStep(2)}>
               back
             </button>
-            <button className="primary" onClick={() => setStep(4)}>
+            <button className="flow-dark" onClick={() => setStep(4)}>
               next
             </button>
           </div>
@@ -290,25 +288,25 @@ export default function OnboardingView() {
       )}
 
       {step === 4 && (
-        <div className="field">
-          <label>4. Done</label>
-          <div className="sub">
+        <div className="flow-card flow-pad flow-sec">
+          <h3 className="flow-h3">4. Done</h3>
+          <div className="flow-sub">
             Model {status?.model_found ? "ready" : "still missing (dictation falls back to $SUSURRO_MODEL)"},
             speed tier {status?.tier || bench?.tier || "unset"},
             hotkey {HOTKEYS.find((h) => h.name === hotkey)?.label}.
           </div>
           <div className="row">
-            <button className="ghost" onClick={() => setStep(3)}>
+            <button className="flow-mini" onClick={() => setStep(3)}>
               back
             </button>
-            <button className="primary" onClick={finish} disabled={busy === "finish"}>
+            <button className="flow-dark" onClick={finish} disabled={busy === "finish"}>
               {busy === "finish" ? "saving..." : "start dictating"}
             </button>
           </div>
         </div>
       )}
 
-      {note && <div className="update-note" aria-live={display.announce ? "polite" : "off"}>{note}</div>}
+      {note && <div className="flow-note" aria-live={display.announce ? "polite" : "off"}>{note}</div>}
     </div>
   );
 }

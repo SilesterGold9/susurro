@@ -172,67 +172,69 @@ export default function SettingsView() {
   const live = s.announce ? "polite" : "off";
 
   return (
-    <div className={`settings${s.high_contrast ? " high-contrast" : ""}`}>
-      {/* Split keeps the coral comma styled while screen readers
-          announce susurro with its comma exactly once. */}
-      <h1 className="brand-wordmark" aria-label="susurro,">
-        susurro<span className="comma" aria-hidden="true">,</span>
-      </h1>
-      <div className="sub">Talk-to-text that works even when the internet doesn't.</div>
+    <div className={s.high_contrast ? "high-contrast" : ""}>
+      <div className="flow-sub">Talk-to-text that works even when the internet doesn't.</div>
 
-      <div className="field">
-        <label>Recording window (seconds)</label>
+      <div className="flow-card flow-pad flow-sec">
+        <h3 className="flow-h3">Recording</h3>
+        <label className="flow-label">Recording window (seconds)</label>
         <input
+          className="flow-input mono"
           type="number"
           value={s.seconds}
           onChange={(e) => set("seconds", Number(e.target.value))}
         />
-      </div>
-      <div className="field row">
+        <label className="flow-check">
+          <input
+            type="checkbox"
+            checked={s.auto_stop}
+            onChange={(e) => set("auto_stop", e.target.checked)}
+          />
+          <span>Stop on end-of-speech (VAD)</span>
+        </label>
+        <label className="flow-check">
+          <input
+            type="checkbox"
+            checked={s.sound}
+            onChange={(e) => set("sound", e.target.checked)}
+          />
+          <span>Sound cues (start, stop, done, error)</span>
+        </label>
+        <label className="flow-label">PipeWire target (empty means default source)</label>
         <input
-          type="checkbox"
-          checked={s.auto_stop}
-          onChange={(e) => set("auto_stop", e.target.checked)}
+          className="flow-input mono"
+          value={s.device}
+          onChange={(e) => set("device", e.target.value)}
         />
-        <span>Stop on end-of-speech (VAD)</span>
       </div>
-      <div className="field row">
-        <input
-          type="checkbox"
-          checked={s.sound}
-          onChange={(e) => set("sound", e.target.checked)}
-        />
-        <span>Sound cues (start, stop, done, error)</span>
-      </div>
-      <div className="field">
-        <label>Cleanup</label>
-        <select value={s.cleanup} onChange={(e) => set("cleanup", e.target.value)}>
+
+      <div className="flow-card flow-pad flow-sec">
+        <h3 className="flow-h3">Cleanup and models</h3>
+        <label className="flow-label">Cleanup</label>
+        <select
+          className="flow-input"
+          value={s.cleanup}
+          onChange={(e) => set("cleanup", e.target.value)}
+        >
           <option value="none">none (raw transcript)</option>
           <option value="regex">regex fallback</option>
           <option value="ollama">ollama (local LLM)</option>
         </select>
-      </div>
-      <div className="field">
-        <label>Ollama model</label>
+        <label className="flow-label">Ollama model</label>
         <input
+          className="flow-input mono"
           value={s.ollama_model}
           onChange={(e) => set("ollama_model", e.target.value)}
         />
-      </div>
-      <div className="field">
-        <label>Whisper model path (empty means $SUSURRO_MODEL)</label>
+        <label className="flow-label">Whisper model path (empty means $SUSURRO_MODEL)</label>
         <input
+          className="flow-input mono"
           value={s.whisper_model}
           onChange={(e) => set("whisper_model", e.target.value)}
         />
-      </div>
-      <div className="field">
-        <label>PipeWire target (empty means default source)</label>
-        <input value={s.device} onChange={(e) => set("device", e.target.value)} />
-      </div>
-      <div className="field">
-        <label>Release channel</label>
+        <label className="flow-label">Release channel</label>
         <select
+          className="flow-input"
           value={s.update_channel}
           onChange={(e) => set("update_channel", e.target.value)}
         >
@@ -241,21 +243,24 @@ export default function SettingsView() {
         </select>
       </div>
 
-      <div className="field">
-        <label>Tone follows the app (formal in docs, casual in messages)</label>
+      <div className="flow-card flow-pad flow-sec">
+        <h3 className="flow-h3">Tone follows the app</h3>
+        <div className="flow-sub">Formal in docs, casual in messages. Also on the Style page.</div>
         <div className="row">
-          <button className="ghost" onClick={loadProfiles} aria-label="load format profiles">
+          <button className="flow-mini" onClick={loadProfiles} aria-label="load format profiles">
             load profiles
           </button>
         </div>
         <div className="row">
           <input
+            className="flow-search"
             value={profileApp}
             onChange={(e) => setProfileApp(e.target.value)}
             placeholder="app pattern, e.g. docs"
             aria-label="app pattern"
           />
           <select
+            className="flow-search"
             value={profileStyle}
             onChange={(e) => setProfileStyle(e.target.value)}
             aria-label="profile style"
@@ -264,22 +269,22 @@ export default function SettingsView() {
             <option value="casual">casual (tidy only)</option>
             <option value="verbatim">verbatim (raw)</option>
           </select>
-          <button className="ghost" onClick={saveProfile} aria-label="save format profile">
+          <button className="flow-mini" onClick={saveProfile} aria-label="save format profile">
             save profile
           </button>
         </div>
       </div>
-      {profileNote && <div className="update-note" aria-live={live}>{profileNote}</div>}
+      {profileNote && <div className="flow-note" aria-live={live}>{profileNote}</div>}
       {profiles.length > 0 && (
-        <div className="history">
+        <div className="flow-card flow-sec">
           {profiles.map((p) => (
-            <div key={p.app} className="history-row">
-              <div className="mono">
+            <div key={p.app} className="flow-row">
+              <div className="flow-text flow-mono">
                 {p.app}: {p.style} (cleanup {p.cleanup})
               </div>
-              <div className="row">
+              <div className="flow-actions">
                 <button
-                  className="ghost"
+                  className="flow-mini"
                   onClick={() => removeProfile(p.app)}
                   aria-label={`remove profile ${p.app}`}
                 >
@@ -291,42 +296,41 @@ export default function SettingsView() {
         </div>
       )}
 
-      <div className="row">
-        <button className="primary" onClick={save}>
+      <div className="row flow-sec">
+        <button className="flow-dark" onClick={save}>
           {saved ? "saved" : "save"}
         </button>
-        <button className="ghost" onClick={checkUpdates}>
+        <button className="flow-mini" onClick={checkUpdates}>
           check for updates
         </button>
-        <button className="ghost" onClick={runDoctor}>
+        <button className="flow-mini" onClick={runDoctor}>
           run doctor
         </button>
       </div>
-      <div className="update-note" aria-live={live}>{updateNote}</div>
+      <div className="flow-note" aria-live={live}>{updateNote}</div>
       {doctor && (
-        <div className="history">
-          <pre className="mono" style={{ whiteSpace: "pre-wrap" }}>
+        <div className="flow-card flow-pad flow-sec">
+          <pre className="flow-mono">
             {doctor}
           </pre>
         </div>
       )}
 
-      <div className="field">
-        <label>Reading the screen</label>
-        <div className="sub">The hotkey remaps live. Contrast and announcements apply on save.</div>
-        <div className="field">
-          <label>Dictation hotkey</label>
-          <select
-            value={s.hotkey}
-            onChange={(e) => set("hotkey", e.target.value)}
-            aria-label="dictation hotkey"
-          >
-            <option value="super_shift_r">Super + Shift + R</option>
-            <option value="ctrl_shift_r">Ctrl + Shift + R</option>
-            <option value="shift_d">Shift + D</option>
-          </select>
-        </div>
-        <div className="field row">
+      <div className="flow-card flow-pad flow-sec">
+        <h3 className="flow-h3">Reading the screen</h3>
+        <div className="flow-sub">The hotkey remaps live. Contrast and announcements apply on save.</div>
+        <label className="flow-label">Dictation hotkey</label>
+        <select
+          className="flow-input"
+          value={s.hotkey}
+          onChange={(e) => set("hotkey", e.target.value)}
+          aria-label="dictation hotkey"
+        >
+          <option value="super_shift_r">Super + Shift + R</option>
+          <option value="ctrl_shift_r">Ctrl + Shift + R</option>
+          <option value="shift_d">Shift + D</option>
+        </select>
+        <label className="flow-check">
           <input
             type="checkbox"
             checked={s.high_contrast}
@@ -334,8 +338,8 @@ export default function SettingsView() {
             aria-label="high contrast"
           />
           <span>High contrast</span>
-        </div>
-        <div className="field row">
+        </label>
+        <label className="flow-check">
           <input
             type="checkbox"
             checked={s.announce}
@@ -343,29 +347,30 @@ export default function SettingsView() {
             aria-label="screen reader announcements"
           />
           <span>Screen reader announcements</span>
-        </div>
+        </label>
       </div>
 
-      <div className="field">
-        <label>History (raw beside cleaned)</label>
+      <div className="flow-card flow-pad flow-sec">
+        <h3 className="flow-h3">History</h3>
+        <div className="flow-sub">Raw beside cleaned, with restore.</div>
         <div className="row">
-          <button className="ghost" onClick={loadHistory} aria-label="load history">
+          <button className="flow-mini" onClick={loadHistory} aria-label="load history">
             load history
           </button>
         </div>
       </div>
-      {historyNote && <div className="update-note" aria-live={live}>{historyNote}</div>}
+      {historyNote && <div className="flow-note" aria-live={live}>{historyNote}</div>}
       {history.length > 0 && (
-        <div className="history">
+        <div className="flow-card flow-sec">
           {history.map((h) => {
             const raw = showRaw[h.session];
             const body = raw ? h.raw_text : h.cleaned_text || h.raw_text;
             return (
-              <div key={h.session} className="history-row">
-                <div className="mono" style={{ whiteSpace: "pre-wrap" }}>
+              <div key={h.session} className="flow-row">
+                <div className="flow-text flow-mono">
                   {body}
                 </div>
-                <div className="sub">
+                <div className="flow-sub">
                   {h.provider} | {h.latency_ms}ms | {h.session.slice(0, 8)}
                   {h.cleaned_text && h.cleaned_text !== h.raw_text
                     ? raw
@@ -373,10 +378,10 @@ export default function SettingsView() {
                       : " | showing polished"
                     : ""}
                 </div>
-                <div className="row">
+                <div className="flow-actions">
                   {h.cleaned_text && h.cleaned_text !== h.raw_text && (
                     <button
-                      className="ghost"
+                      className="flow-mini"
                       onClick={() => toggleRaw(h.session)}
                       aria-label={raw ? "show polished text" : "show raw transcript"}
                     >
@@ -384,7 +389,7 @@ export default function SettingsView() {
                     </button>
                   )}
                   <button
-                    className="ghost"
+                    className="flow-mini"
                     onClick={() => restoreRaw(h.session)}
                     aria-label={`restore raw transcript ${h.session.slice(0, 8)}`}
                   >
@@ -397,29 +402,30 @@ export default function SettingsView() {
         </div>
       )}
 
-      <div className="field">
-        <label>Usage (words, streak, latency)</label>
+      <div className="flow-card flow-pad flow-sec">
+        <h3 className="flow-h3">Usage</h3>
+        <div className="flow-sub">Words, streak, latency. Also on the Insights page.</div>
         <div className="row">
-          <button className="ghost" onClick={loadStats} aria-label="load usage stats">
+          <button className="flow-mini" onClick={loadStats} aria-label="load usage stats">
             load stats
           </button>
         </div>
       </div>
-      {statsNote && <div className="update-note" aria-live={live}>{statsNote}</div>}
+      {statsNote && <div className="flow-note" aria-live={live}>{statsNote}</div>}
       {stats && (
-        <div className="history">
-          <div className="mono">
+        <div className="flow-card flow-pad flow-sec">
+          <div className="flow-mono">
             {stats.entries} sessions | {stats.words} words | {stats.polished} polished |{" "}
             {stats.dict_hits} dict hits ({stats.dict_phrases} phrases) | {stats.streak_days}d streak
           </div>
-          <div className="sub">
+          <div className="flow-sub">
             latency p50 {stats.p50_ms}ms, p95 {stats.p95_ms}ms, p99 {stats.p99_ms}ms end to end.
             {stats.top_apps.length
               ? ` Top apps: ${stats.top_apps.map((t) => `${t.app} ${t.sessions}`).join(", ")}.`
               : " Top apps: unknown yet."}
           </div>
           {stats.days.map((d) => (
-            <div key={d.label} className="mono">
+            <div key={d.label} className="flow-mono">
               {d.label}: {d.words} words
             </div>
           ))}
