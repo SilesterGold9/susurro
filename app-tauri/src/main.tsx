@@ -4,18 +4,36 @@ import { getCurrentWindow } from "@tauri-apps/api/window";
 import Pill from "./pill";
 import OnboardingView from "./onboarding";
 import Shell from "./shell";
+import { ErrorBoundary } from "./errorbound";
 import "./styles.css";
 
 function App() {
   const [label, setLabel] = React.useState("pill");
   React.useEffect(() => {
     try {
-      setLabel(getCurrentWindow().label);
-    } catch {}
+      const w = getCurrentWindow();
+      setLabel(w.label);
+    } catch (e) {
+      console.error("window label unreadable, falling back to pill", e);
+    }
   }, []);
-  if (label === "pill") return <Pill />;
-  if (label === "onboarding") return <OnboardingView />;
-  return <Shell />;
+  if (label === "pill")
+    return (
+      <ErrorBoundary label={label}>
+        <Pill />
+      </ErrorBoundary>
+    );
+  if (label === "onboarding")
+    return (
+      <ErrorBoundary label={label}>
+        <OnboardingView />
+      </ErrorBoundary>
+    );
+  return (
+    <ErrorBoundary label={label}>
+      <Shell />
+    </ErrorBoundary>
+  );
 }
 
 ReactDOM.createRoot(document.getElementById("root")!).render(
