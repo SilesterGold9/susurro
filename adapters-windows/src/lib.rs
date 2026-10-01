@@ -130,6 +130,100 @@ pub fn utf16_units(text: &str) -> Vec<u16> {
     text.encode_utf16().collect()
 }
 
+/// Focused app exe stem on Windows for privacy routing (Windows
+/// audit): foreground window to process image name, lowercased so
+/// `WindowsTerminal` matches the `terminal` blocklist entry.
+/// Unknown or unreadable never matches, failing open like Linux.
+#[cfg(target_os = "windows")]
+pub fn focused_app() -> Option<String> {
+    use windows_sys::Win32::Foundation::{CloseHandle, MAX_PATH};
+    use windows_sys::Win32::System::Threading::{
+        OpenProcess, QueryFullProcessImageNameW, PROCESS_QUERY_LIMITED_INFORMATION,
+    };
+    use windows_sys::Win32::UI::WindowsAndMessaging::{
+        GetForegroundWindow, GetWindowThreadProcessId,
+    };
+    unsafe {
+        let hwnd = GetForegroundWindow();
+        if hwnd.is_null() {
+            return None;
+        }
+        let mut pid = 0u32;
+        GetWindowThreadProcessId(hwnd, &mut pid);
+        if pid == 0 {
+            return None;
+        }
+        let handle = OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, 0, pid);
+        if handle.is_null() {
+            return None;
+        }
+        let mut len = MAX_PATH;
+        let mut buf = [0u16; MAX_PATH as usize];
+        let ok = QueryFullProcessImageNameW(handle, 0, buf.as_mut_ptr(), &mut len);
+        CloseHandle(handle);
+        if ok == 0 {
+            return None;
+        }
+        let path = String::from_utf16_lossy(&buf[..len as usize]);
+        exe_stem(&path)
+    }
+}
+
+/// Off Windows there is no foreground window to read.
+#[cfg(not(target_os = "windows"))]
+pub fn focused_app() -> Option<String> {
+    None
+}
+
+/// Exe stem of a process image path, lowercased for blocklist
+/// matching. Pure so Linux CI proves the normalization while
+/// Windows CI proves the Win32 reads.
+pub fn exe_stem(path: &str) -> Option<String> {
+    // Both separators: image paths arrive with backslashes.
+    let base = path.rsplit(['/', '\\']).next()?;
+    let stem = base.strip_suffix(".exe").unwrap_or(base);
+    if stem.trim().is_empty() {
+        return None;
+    }
+    Some(stem.to_lowercase())
+}
+
+/// Taskbar-aware dock area on Windows (Windows audit): full monitor
+/// height includes the taskbar strip, so bottom-docking against it
+/// hides the pill behind the bar. Physical pixels (x, y, w, h) of
+/// the work area; callers divide by the monitor scale for logical
+/// coordinates. None when the area cannot be read.
+#[cfg(target_os = "windows")]
+pub fn work_area_px() -> Option<(i32, i32, i32, i32)> {
+    use windows_sys::Win32::UI::WindowsAndMessaging::{
+        SystemParametersInfoW, RECT, SPI_GETWORKAREA,
+    };
+    unsafe {
+        let mut rect: RECT = std::mem::zeroed();
+        if SystemParametersInfoW(
+            SPI_GETWORKAREA,
+            0,
+            &mut rect as *mut _ as *mut std::ffi::c_void,
+            0,
+        ) == 0
+        {
+            return None;
+        }
+        let (l, t, r, b) = (rect.left, rect.top, rect.right, rect.bottom);
+        if r > l && b > t {
+            Some((l, t, r - l, b - t))
+        } else {
+            None
+        }
+    }
+}
+
+/// Off Windows there is no Win32 work area to read.
+#[cfg(not(target_os = "windows"))]
+pub fn work_area_px() -> Option<(i32, i32, i32, i32)> {
+    None
+}
+
 /// One SendInput batch holds key-down plus key-up per unit.
 pub fn input_count_for(units: &[u16]) -> usize {
     units.len() * 2
@@ -302,6 +396,24 @@ mod tests {
         // Unknown names degrade to the default, never fail registration.
         assert_eq!(hotkey_from_name("fancy").vk, DEFAULT_VK_R);
         assert!(HOTKEY_CHOICES.contains(&"super_shift_r"));
+    }
+
+    #[test]
+    fn exe_stems_normalize_for_matching() {
+        assert_eq!(
+            exe_stem(r"C:\Windows\System32\notepad.exe").as_deref(),
+            Some("notepad")
+        );
+        assert_eq!(
+            exe_stem(r"C:\Program Files\WindowsApps\1Password.exe").as_deref(),
+            Some("1password")
+        );
+        assert_eq!(
+            exe_stem("WindowsTerminal.exe").as_deref(),
+            Some("windowsterminal")
+        );
+        assert_eq!(exe_stem(""), None);
+        assert_eq!(exe_stem(".exe"), None);
     }
 
     #[test]

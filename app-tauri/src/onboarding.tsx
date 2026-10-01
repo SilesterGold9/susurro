@@ -1,7 +1,18 @@
 import { useEffect, useState } from "react";
 import { invoke } from "@tauri-apps/api/core";
+import { listen } from "@tauri-apps/api/event";
 import { getCurrentWindow } from "@tauri-apps/api/window";
 import type { Settings } from "./settings";
+
+interface Requirements {
+  os: string;
+  whisper: string | null;
+  model_found: boolean;
+  model_path: string;
+  paste_ok: boolean;
+  paste_detail: string;
+  whisper_hint: string;
+}
 
 interface OnboardingStatus {
   model_found: boolean;
@@ -42,6 +53,8 @@ export default function OnboardingView() {
   const [busy, setBusy] = useState("");
   const [note, setNote] = useState("");
   const [display, setDisplay] = useState({ high_contrast: false, announce: true });
+  const [reqs, setReqs] = useState<Requirements | null>(null);
+  const [pct, setPct] = useState<number | null>(null);
 
   async function refresh() {
     try {
@@ -55,10 +68,30 @@ export default function OnboardingView() {
       const prefs = await invoke<Settings>("get_settings");
       setDisplay({ high_contrast: prefs.high_contrast, announce: prefs.announce });
     } catch {}
+    try {
+      setReqs(await invoke<Requirements>("requirements_status"));
+    } catch (e) {
+      setNote(`Couldn't read requirements. ${e}`);
+    }
   }
 
   useEffect(() => {
     refresh();
+    const off = listen<{ step: string; state: string; pct?: number }>(
+      "susurro://onboarding",
+      (e) => {
+        if (e.payload?.step === "model" && typeof e.payload.pct === "number") {
+          setPct(e.payload.pct);
+        }
+        if (e.payload?.state === "done") {
+          setPct(null);
+          refresh();
+        }
+      },
+    );
+    return () => {
+      off.then((f) => f());
+    };
   }, []);
 
   useEffect(() => {
@@ -68,6 +101,7 @@ export default function OnboardingView() {
   async function download() {
     setBusy("model");
     setNote("");
+    setPct(0);
     try {
       const path = await invoke<string>("download_model");
       setNote(`model ready: ${path}.`);
@@ -76,6 +110,7 @@ export default function OnboardingView() {
       setNote(`Couldn't download the model. ${e}`);
     }
     setBusy("");
+    setPct(null);
   }
 
   async function runBench() {
@@ -124,7 +159,29 @@ export default function OnboardingView() {
 
       {step === 1 && (
         <div className="field">
-          <label>1. Model plus speed check</label>
+          <label>1. Requirements, model, speed check</label>
+          <div className="sub">
+            {reqs ? (
+              <>
+                <div>
+                  {reqs.whisper
+                    ? `whisper ready: ${reqs.whisper}.`
+                    : "whisper missing: dictation cannot run yet."}
+                </div>
+                {!reqs.whisper && reqs.whisper_hint && <div>{reqs.whisper_hint}</div>}
+                <div>
+                  {reqs.paste_ok ? reqs.paste_detail : `paste: ${reqs.paste_detail}`}.
+                </div>
+              </>
+            ) : (
+              "checking requirements..."
+            )}
+          </div>
+          <div className="row">
+            <button className="ghost" onClick={refresh} aria-label="recheck requirements">
+              recheck
+            </button>
+          </div>
           <div className="sub">
             {status
               ? status.model_found
@@ -144,6 +201,11 @@ export default function OnboardingView() {
               {busy === "bench" ? "measuring..." : "run speed check"}
             </button>
           </div>
+          {pct !== null && (
+            <div className="sub" aria-live="polite">
+              downloading model: {pct}%.
+            </div>
+          )}
           {(bench || status?.tier) && (
             <div className="sub">
               {bench

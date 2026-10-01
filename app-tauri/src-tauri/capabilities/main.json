@@ -1,8 +1,8 @@
 {
   "$schema": "../gen/schemas/desktop-schema.json",
   "identifier": "main-capability",
-  "description": "Permissions for Susurro pill and settings windows",
-  "windows": ["pill", "settings"],
+  "description": "Permissions for Susurro pill, settings, and onboarding windows",
+  "windows": ["pill", "settings", "onboarding"],
   "permissions": [
     "core:default",
     "core:event:allow-listen",
@@ -10,6 +10,7 @@
     "core:event:allow-unlisten",
     "core:window:allow-show",
     "core:window:allow-hide",
+    "core:window:allow-start-dragging",
     "updater:default"
   ]
 }

@@ -182,7 +182,7 @@ fn run_doctor() -> String {
         let probe = "where";
         #[cfg(not(target_os = "windows"))]
         let probe = "which";
-        let found = std::process::Command::new(probe)
+        let found = susurro_core::silent_command(probe)
             .arg(tool)
             .output()
             .map(|o| o.status.success())
@@ -335,9 +335,106 @@ fn checksum_line(path: &str) -> String {
     }
 }
 
+/// Last whole percentage in a curl progress-bar chunk, if any.
+/// The bar rewrites one carriage-return line ending in `NN.N%`;
+/// scanning for the last `%` keeps partial reads convergent.
+fn curl_progress_pct(chunk: &[u8]) -> Option<u64> {
+    let text = String::from_utf8_lossy(chunk);
+    let idx = text.rfind('%')?;
+    let digits: String = text[..idx]
+        .chars()
+        .rev()
+        .take_while(|c| c.is_ascii_digit() || *c == '.')
+        .collect::<String>()
+        .chars()
+        .rev()
+        .collect();
+    let whole = digits.split('.').next().unwrap_or("");
+    if whole.is_empty() {
+        return None;
+    }
+    whole.parse::<u64>().ok().filter(|p| *p <= 100)
+}
+
+/// System requirements for onboarding screen one (Windows audit):
+/// whisper binary, model, and paste tools with per-OS install hints.
+/// Nothing here blocks: each item names its own fix.
+#[tauri::command]
+fn requirements_status(state: State<'_, Arc<AppState>>) -> Result<serde_json::Value, String> {
+    let settings = state.settings.lock().map_err(|e| e.to_string())?.clone();
+    let whisper = susurro_core::silent_command("whisper-cli")
+        .arg("--version")
+        .output()
+        .ok()
+        .filter(|o| o.status.success())
+        .map(|o| {
+            String::from_utf8_lossy(&o.stdout)
+                .lines()
+                .next()
+                .unwrap_or("whisper-cli")
+                .trim()
+                .chars()
+                .take(40)
+                .collect::<String>()
+        });
+    let model_path = resolve_whisper(&settings.whisper_model);
+    let model_found = std::path::Path::new(&model_path).exists();
+    #[cfg(target_os = "windows")]
+    let os = "windows";
+    #[cfg(target_os = "linux")]
+    let os = "linux";
+    #[cfg(not(any(target_os = "windows", target_os = "linux")))]
+    let os = "other";
+    #[cfg(target_os = "windows")]
+    let (paste_ok, paste_detail) = (true, "SendInput direct-type, no tools needed".to_string());
+    #[cfg(not(target_os = "windows"))]
+    let (paste_ok, paste_detail) = {
+        let mut missing = Vec::new();
+        for tool in ["wl-copy", "ydotool", "socat"] {
+            let found = susurro_core::silent_command(if cfg!(target_os = "windows") {
+                "where"
+            } else {
+                "which"
+            })
+            .arg(tool)
+            .output()
+            .map(|o| o.status.success())
+            .unwrap_or(false);
+            if !found {
+                missing.push(tool);
+            }
+        }
+        if missing.is_empty() {
+            (true, "wl-copy plus ydotool paste ready".to_string())
+        } else {
+            (
+                false,
+                format!("missing {} — see README", missing.join(", ")),
+            )
+        }
+    };
+    let whisper_hint = if whisper.is_some() {
+        String::new()
+    } else if os == "windows" {
+        "Install whisper.cpp for Windows: unzip a whisper-cli.exe build plus its DLLs into one folder, add that folder to PATH (MSVC redist may be required), then recheck.".into()
+    } else {
+        "Install whisper.cpp (distro package or build from source) so whisper-cli is on PATH, then recheck.".into()
+    };
+    Ok(serde_json::json!({
+        "os": os,
+        "whisper": whisper,
+        "model_found": model_found,
+        "model_path": model_path,
+        "paste_ok": paste_ok,
+        "paste_detail": paste_detail,
+        "whisper_hint": whisper_hint,
+    }))
+}
+
 /// Download base.en from the whisper.cpp release mirror into the
 /// models dir. Atomic temp plus rename, so a retry converges instead
-/// of leaving a half file behind.
+/// of leaving a half file behind. Progress rides the onboarding
+/// event as percentages parsed from the transfer bar.
 #[tauri::command]
 fn download_model(app: AppHandle) -> Result<String, String> {
     const MODEL_URL: &str =
@@ -351,12 +448,60 @@ fn download_model(app: AppHandle) -> Result<String, String> {
     let tmp = dir.join("base.en.bin.tmp");
     let _ = app.emit(
         "susurro://onboarding",
-        serde_json::json!({ "step": "model", "state": "downloading" }),
+        serde_json::json!({ "step": "model", "state": "downloading", "pct": 0 }),
     );
-    let status = std::process::Command::new("curl")
-        .args(["-sSL", "--fail", MODEL_URL, "-o", &tmp.to_string_lossy()])
-        .status()
+    // Progress bar on stderr: parse trailing percentages off the
+    // carriage-return updates and emit whole points upward only.
+    let mut child = susurro_core::silent_command("curl")
+        .args([
+            "-sSL",
+            "--fail",
+            "--progress-bar",
+            MODEL_URL,
+            "-o",
+            &tmp.to_string_lossy(),
+        ])
+        .stderr(std::process::Stdio::piped())
+        .spawn()
         .map_err(|e| format!("Couldn't run curl (is curl installed?): {e}"))?;
+    if let Some(stderr) = child.stderr.take() {
+        use std::io::Read;
+        let progress_app = app.clone();
+        std::thread::spawn(move || {
+            let mut last = 0u64;
+            let mut buf = [0u8; 1024];
+            let mut tail = Vec::new();
+            let mut reader: Box<dyn Read> = Box::new(stderr);
+            loop {
+                match reader.read(&mut buf) {
+                    Ok(0) => break,
+                    Ok(n) => {
+                        tail.extend_from_slice(&buf[..n]);
+                        if let Some(pct) = curl_progress_pct(&tail) {
+                            if pct > last {
+                                last = pct;
+                                let _ = progress_app.emit(
+                                    "susurro://onboarding",
+                                    serde_json::json!({
+                                        "step": "model",
+                                        "state": "downloading",
+                                        "pct": pct,
+                                    }),
+                                );
+                            }
+                        }
+                        if tail.len() > 4096 {
+                            tail.drain(..tail.len() - 1024);
+                        }
+                    }
+                    Err(_) => break,
+                }
+            }
+        });
+    }
+    let status = child
+        .wait()
+        .map_err(|e| format!("model download failed: {e}"))?;
     if !status.success() {
         let _ = std::fs::remove_file(&tmp);
         let _ = app.emit(
@@ -579,11 +724,22 @@ fn show_pill(app: &AppHandle, sound: bool) {
         if let Some(m) = monitor {
             let scale = m.scale_factor();
             let size = m.size().to_logical::<f64>(scale);
-            // Window is 360x64 logical; place center-x, ~92% down.
+            // Window is 360x64 logical; place center-x above the bottom
+            // edge with a margin. On Windows the edge is the work area
+            // (taskbar excluded): docking against full height hides the
+            // pill behind the bar.
+            #[cfg(target_os = "windows")]
+            let (x, y) = match susurro_adapters_windows::work_area_px() {
+                Some((wx, wy, ww, wh)) => (
+                    (wx as f64 + (ww as f64 - 360.0) / 2.0) / scale,
+                    (wy as f64 + wh as f64 - 64.0 - 12.0) / scale,
+                ),
+                None => (size.width / 2.0 - 360.0 / 2.0, size.height * 0.92),
+            };
+            #[cfg(not(target_os = "windows"))]
+            let (x, y) = (size.width / 2.0 - 360.0 / 2.0, size.height * 0.92);
             // Below 768p screens this clips a few pixels; dragging
             // overrides the dock wherever the compositor honors moves.
-            let x = size.width / 2.0 - 360.0 / 2.0;
-            let y = size.height * 0.92;
             let _ = w.set_position(tauri::Position::Logical(tauri::LogicalPosition { x, y }));
         } else {
             eprintln!("pill: no monitor found, showing at default position");
@@ -858,7 +1014,7 @@ struct DragAnchor {
 /// the sole caller.
 #[cfg(target_os = "linux")]
 fn hyprland_clients() -> Result<serde_json::Value, String> {
-    let out = std::process::Command::new("hyprctl")
+    let out = susurro_core::silent_command("hyprctl")
         .args(["clients", "-j"])
         .output()
         .map_err(|e| format!("Couldn't run hyprctl (Hyprland only): {e}"))?;
@@ -892,7 +1048,7 @@ fn pill_address(clients: &serde_json::Value) -> Option<(String, i32, i32)> {
 #[cfg(target_os = "linux")]
 fn hyprland_move(address: &str, x: i32, y: i32) -> Result<(), String> {
     // Argv shape proven live: address rides the last param after a comma.
-    let out = std::process::Command::new("hyprctl")
+    let out = susurro_core::silent_command("hyprctl")
         .args([
             "dispatch".to_string(),
             "movewindowpixel".to_string(),
@@ -1114,6 +1270,7 @@ fn main() {
             save_format_profile,
             remove_format_profile,
             onboarding_status,
+            requirements_status,
             download_model,
             run_bench,
             test_dictation,

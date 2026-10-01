@@ -493,14 +493,18 @@ export default function Pill() {
         window.addEventListener("pointerup", endDrag);
         window.addEventListener("pointercancel", endDrag);
       })
-      .catch((err) => {
-        // Surface the reason in the pill: a silent fallback is what
-        // made the last failure undebuggable. Next run clears it.
-        setFlash({
-          text: `can't drag: ${err instanceof Error ? err.message : String(err)}`.slice(0, 64),
-          key: Date.now(),
-        });
-        void getCurrentWindow().startDragging().catch(() => {});
+      .catch(() => {
+        // The backend drag is Hyprland-only, so off Linux this
+        // rejection is routine: fall back to OS dragging and only
+        // flash when that fails too.
+        void getCurrentWindow()
+          .startDragging()
+          .catch((err) => {
+            setFlash({
+              text: `can't drag: ${err instanceof Error ? err.message : String(err)}`.slice(0, 64),
+              key: Date.now(),
+            });
+          });
       });
   }
 
