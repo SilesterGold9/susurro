@@ -26,11 +26,22 @@ const DEFAULTS: Settings = {
   update_channel: "stable",
 };
 
+export interface HistoryRow {
+  session: string;
+  raw_text: string;
+  cleaned_text: string | null;
+  provider: string;
+  latency_ms: number;
+}
+
 export default function SettingsView() {
   const [s, setS] = useState<Settings>(DEFAULTS);
   const [saved, setSaved] = useState(false);
   const [updateNote, setUpdateNote] = useState("no updates checked yet.");
   const [doctor, setDoctor] = useState("");
+  const [history, setHistory] = useState<HistoryRow[]>([]);
+  const [showRaw, setShowRaw] = useState<Record<string, boolean>>({});
+  const [historyNote, setHistoryNote] = useState("");
 
   useEffect(() => {
     invoke<Settings>("get_settings").then(setS).catch(() => {});
@@ -56,6 +67,29 @@ export default function SettingsView() {
 
   async function runDoctor() {
     setDoctor(await invoke<string>("run_doctor"));
+  }
+
+  async function loadHistory() {
+    try {
+      const rows = await invoke<HistoryRow[]>("list_history", { limit: 20 });
+      setHistory(rows);
+      setHistoryNote(rows.length ? "" : "no history yet. Dictate something first.");
+    } catch (e) {
+      setHistoryNote(`Couldn't read history. ${e}`);
+    }
+  }
+
+  async function restoreRaw(session: string) {
+    try {
+      const msg = await invoke<string>("restore_session", { session });
+      setHistoryNote(msg);
+    } catch (e) {
+      setHistoryNote(`Couldn't restore. ${e}`);
+    }
+  }
+
+  function toggleRaw(session: string) {
+    setShowRaw({ ...showRaw, [session]: !showRaw[session] });
   }
 
   function set<K extends keyof Settings>(k: K, v: Settings[K]) {
@@ -149,6 +183,57 @@ export default function SettingsView() {
           <pre className="mono" style={{ whiteSpace: "pre-wrap" }}>
             {doctor}
           </pre>
+        </div>
+      )}
+
+      <div className="field">
+        <label>History (raw beside cleaned)</label>
+        <div className="row">
+          <button className="ghost" onClick={loadHistory} aria-label="load history">
+            load history
+          </button>
+        </div>
+      </div>
+      {historyNote && <div className="update-note">{historyNote}</div>}
+      {history.length > 0 && (
+        <div className="history">
+          {history.map((h) => {
+            const raw = showRaw[h.session];
+            const body = raw ? h.raw_text : h.cleaned_text || h.raw_text;
+            return (
+              <div key={h.session} className="history-row">
+                <div className="mono" style={{ whiteSpace: "pre-wrap" }}>
+                  {body}
+                </div>
+                <div className="sub">
+                  {h.provider} | {h.latency_ms}ms | {h.session.slice(0, 8)}
+                  {h.cleaned_text && h.cleaned_text !== h.raw_text
+                    ? raw
+                      ? " | showing raw"
+                      : " | showing polished"
+                    : ""}
+                </div>
+                <div className="row">
+                  {h.cleaned_text && h.cleaned_text !== h.raw_text && (
+                    <button
+                      className="ghost"
+                      onClick={() => toggleRaw(h.session)}
+                      aria-label={raw ? "show polished text" : "show raw transcript"}
+                    >
+                      {raw ? "show polished" : "show raw"}
+                    </button>
+                  )}
+                  <button
+                    className="ghost"
+                    onClick={() => restoreRaw(h.session)}
+                    aria-label={`restore raw transcript ${h.session.slice(0, 8)}`}
+                  >
+                    restore raw
+                  </button>
+                </div>
+              </div>
+            );
+          })}
         </div>
       )}
     </div>

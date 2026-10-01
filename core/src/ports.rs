@@ -108,6 +108,42 @@ pub trait HistoryStorePort: Send + Sync {
     fn remove(&mut self, session: crate::SessionId) -> Result<(), crate::CoreError>;
 }
 
+/// Session hex for an entry, the prefix language of replay/undo/restore.
+pub fn session_hex(session: crate::SessionId) -> String {
+    format!("{:032x}", session.0)
+}
+
+/// Pick one history entry for restore. `entries` is newest-first, as
+/// `SqliteHistory::recent` returns. Empty prefix prefers the most
+/// recent entry the polisher changed, else the most recent entry.
+/// A non-empty prefix must match exactly one session id prefix.
+/// Errors name the fix; nothing here guesses.
+pub fn find_history_entry(entries: &[HistoryEntry], prefix: &str) -> Result<HistoryEntry, String> {
+    if prefix.trim().is_empty() {
+        return entries
+            .iter()
+            .find(|e| e.cleaned_text.as_deref().is_some_and(|c| c != e.raw_text))
+            .or(entries.first())
+            .cloned()
+            .ok_or_else(|| "no history yet. Dictate something first.".to_string());
+    }
+    let hits: Vec<&HistoryEntry> = entries
+        .iter()
+        .filter(|e| session_hex(e.session).starts_with(prefix.trim()))
+        .collect();
+    match hits.len() {
+        0 => Err(format!(
+            "no session starting with '{}'. List with history first.",
+            prefix.trim()
+        )),
+        1 => Ok(hits[0].clone()),
+        n => Err(format!(
+            "ambiguous session prefix '{}' ({n} match). Add more characters.",
+            prefix.trim()
+        )),
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum NetworkState {
     Online,
@@ -116,4 +152,53 @@ pub enum NetworkState {
 
 pub trait NetworkStatusPort: Send + Sync {
     fn status(&self) -> NetworkState;
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn entry(session: u128, raw: &str, cleaned: Option<&str>) -> HistoryEntry {
+        HistoryEntry {
+            session: crate::SessionId::new(session),
+            raw_text: raw.into(),
+            cleaned_text: cleaned.map(|c| c.into()),
+            provider: "local".into(),
+            latency_ms: 1,
+        }
+    }
+
+    #[test]
+    fn empty_prefix_prefers_polished_entries() {
+        // Newest-first, as recent() returns: newest plain, older polished.
+        let entries = vec![
+            entry(1, "plain", None),
+            entry(2, "raw words", Some("Raw words.")),
+        ];
+        // Most recent polished entry wins over newer untouched ones.
+        assert_eq!(find_history_entry(&entries, "").unwrap().session.0, 2);
+        // Nothing polished: most recent entry (first).
+        let plain = vec![entry(3, "b", None), entry(1, "a", None)];
+        assert_eq!(find_history_entry(&plain, "").unwrap().session.0, 3);
+        // Identical raw/cleaned counts as untouched.
+        let same = vec![entry(4, "x", Some("x"))];
+        assert_eq!(find_history_entry(&same, "").unwrap().session.0, 4);
+        assert!(find_history_entry(&[], "").is_err());
+    }
+
+    #[test]
+    fn prefixes_match_uniquely_or_error() {
+        let entries = vec![entry(0xabc001, "a", None), entry(0xdef002, "b", None)];
+        let full = session_hex(crate::SessionId::new(0xabc001));
+        assert_eq!(
+            find_history_entry(&entries, &full).unwrap().session.0,
+            0xabc001
+        );
+        assert_eq!(
+            find_history_entry(&entries, &full[..28]).unwrap().session.0,
+            0xabc001
+        );
+        assert!(find_history_entry(&entries, "zzz").is_err());
+        assert!(find_history_entry(&entries, &full[..8]).is_err());
+    }
 }

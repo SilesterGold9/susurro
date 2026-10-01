@@ -9,7 +9,7 @@ use std::sync::{Arc, Mutex};
 #[cfg(target_os = "linux")]
 use susurro_adapters_audio::{EndpointDecision, VadEndpoint};
 use susurro_core::ports::{AudioCapturePort, TextInjectionPort, TextPostProcessorPort};
-use susurro_core::{Pipeline, SessionId, TicketRegistry};
+use susurro_core::{Pipeline, SessionId, Ticket, TicketRegistry};
 use tauri::{AppHandle, Emitter, Manager, State};
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -180,6 +180,71 @@ struct UtteranceResult {
     raw: String,
     cleaned: String,
     latency_ms: u64,
+}
+
+/// Shared history db with the CLI: same path, same rows, so undo in
+/// either surface sees the same sessions.
+fn shared_db_path() -> PathBuf {
+    if let Ok(home) = std::env::var("HOME") {
+        return PathBuf::from(home).join(".local/share/susurro/susurro.db");
+    }
+    #[cfg(target_os = "windows")]
+    if let Ok(local) = std::env::var("LOCALAPPDATA") {
+        return PathBuf::from(local).join("susurro").join("susurro.db");
+    }
+    std::env::temp_dir().join("susurro.db")
+}
+
+#[derive(Clone, Serialize)]
+struct HistoryRow {
+    session: String,
+    raw_text: String,
+    cleaned_text: Option<String>,
+    provider: String,
+    latency_ms: u64,
+}
+
+#[tauri::command]
+fn list_history(limit: u64) -> Result<Vec<HistoryRow>, String> {
+    let h = susurro_storage::SqliteHistory::open(&shared_db_path())
+        .map_err(|e| e.to_string())?;
+    let entries = h
+        .recent(limit.clamp(1, 100) as usize)
+        .map_err(|e| e.to_string())?;
+    Ok(entries
+        .into_iter()
+        .map(|e| HistoryRow {
+            session: e.session.to_string(),
+            raw_text: e.raw_text,
+            cleaned_text: e.cleaned_text,
+            provider: e.provider,
+            latency_ms: e.latency_ms,
+        })
+        .collect())
+}
+
+/// Re-inject one session's raw transcript (v0.8.0, issue 39
+/// addendum): the undo-AI-edit toggle. History keeps the entry;
+/// restoring twice pastes twice, which is the operator asking twice.
+#[tauri::command]
+fn restore_session(session: String) -> Result<String, String> {
+    let h = susurro_storage::SqliteHistory::open(&shared_db_path())
+        .map_err(|e| e.to_string())?;
+    let entries = h.recent(50).map_err(|e| e.to_string())?;
+    let entry = susurro_core::ports::find_history_entry(&entries, &session)?;
+    if entry.raw_text.trim().is_empty() {
+        return Err("nothing to restore. Dictate something first.".into());
+    }
+    GuiInjector
+        .inject(
+            &entry.raw_text,
+            &Ticket::new(SessionId::generate(), "restore"),
+        )
+        .map_err(|e| e.to_string())?;
+    Ok(format!(
+        "restored raw transcript ({} chars).",
+        entry.raw_text.chars().count()
+    ))
 }
 
 struct GuiCapture {
@@ -756,6 +821,8 @@ fn main() {
             get_settings,
             save_settings,
             run_doctor,
+            list_history,
+            restore_session,
             pill_drag_start,
             pill_drag_move
         ])

@@ -18,6 +18,7 @@ susurro-adapters-stt-local = { path = "../../adapters-stt-local" }
 susurro-adapters-cleanup = { path = "../../adapters-cleanup" }
 susurro-adapters-linux = { path = "../../adapters-linux" }
 susurro-adapters-windows = { path = "../../adapters-windows" }
+susurro-storage = { path = "../../storage" }
 
 [features]
 default = ["custom-protocol"]

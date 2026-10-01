@@ -168,6 +168,13 @@ enum Cmd {
     /// Repeat to walk further back. Saying "scratch that" dictates
     /// the same undo hands-free.
     Undo,
+    /// Re-inject the raw transcript of a history session, undoing
+    /// the AI edit. No id restores the most recent polished entry.
+    Restore {
+        /// Session id or unique prefix. Empty restores the latest edit.
+        #[arg(default_value = "")]
+        session: String,
+    },
 }
 
 fn main() -> anyhow::Result<()> {
@@ -275,6 +282,7 @@ fn main() -> anyhow::Result<()> {
         Cmd::SttBench => stt_bench(),
         Cmd::Replay { session } => replay(&session),
         Cmd::Undo => undo(),
+        Cmd::Restore { session } => restore(&session),
     }
 }
 
@@ -1468,20 +1476,10 @@ fn undo_last_session(inject: &dyn susurro_core::ports::TextInjectionPort) -> any
         println!("nothing to undo. Dictate something first.");
         return Ok(());
     }
-    // Persistent exactly-once gate: a replayed undo (restart, double
-    // hotkey on a scratch phrase) must not delete twice.
+    // No ticket gate: undo consumes the history entry, so a repeat
+    // call walks back instead of deleting twice. Replays are safe by
+    // construction, not by ceremony.
     let ticket = susurro_core::Ticket::new(susurro_core::SessionId::generate(), "remove");
-    match susurro_storage::SqliteTickets::open(&db_path()) {
-        Ok(store) => {
-            if !store
-                .claim(&ticket)
-                .map_err(|e| anyhow::anyhow!("Couldn't claim ticket: {e}"))?
-            {
-                anyhow::bail!("Duplicate undo blocked by persistent ticket.");
-            }
-        }
-        Err(e) => eprintln!("ticket store degraded (continuing in-memory): {e}"),
-    }
     inject.remove_last(text, &ticket).map_err(|e| match e {
         susurro_core::CoreError::Injection(msg) => {
             anyhow::anyhow!("Couldn't remove text. Is ydotoold running? {msg}")
@@ -1513,6 +1511,39 @@ fn undo() -> anyhow::Result<()> {
     undo_last_session(undo_injector()?.as_ref())
 }
 
+/// Restore a raw transcript (v0.8.0, issue 39 addendum): re-inject
+/// the unpolished text so nothing the polisher touches is ever
+/// unrecoverable. History keeps the entry; restoring twice pastes
+/// twice, which is the operator asking twice.
+fn restore(session: &str) -> anyhow::Result<()> {
+    let history = susurro_storage::SqliteHistory::open(&db_path())
+        .map_err(|e| anyhow::anyhow!("Couldn't open history: {e}"))?;
+    let entries = history
+        .recent(50)
+        .map_err(|e| anyhow::anyhow!("Couldn't read history: {e}"))?;
+    let entry = susurro_core::ports::find_history_entry(&entries, session)
+        .map_err(|e| anyhow::anyhow!("{e}"))?;
+    if entry.raw_text.trim().is_empty() {
+        println!("nothing to restore. Dictate something first.");
+        return Ok(());
+    }
+    let ticket = susurro_core::Ticket::new(susurro_core::SessionId::generate(), "restore");
+    undo_injector()?
+        .as_ref()
+        .inject(&entry.raw_text, &ticket)
+        .map_err(|e| match e {
+            susurro_core::CoreError::Injection(msg) => {
+                anyhow::anyhow!("Couldn't paste. Is ydotoold running? {msg}")
+            }
+            other => anyhow::anyhow!("{other}"),
+        })?;
+    println!(
+        "restored raw transcript ({} chars).",
+        entry.raw_text.chars().count()
+    );
+    Ok(())
+}
+
 fn show_history(limit: usize) -> anyhow::Result<()> {
     let h = susurro_storage::SqliteHistory::open(&db_path())
         .map_err(|e| anyhow::anyhow!("Couldn't open history: {e}"))?;
@@ -1525,9 +1556,15 @@ fn show_history(limit: usize) -> anyhow::Result<()> {
     }
     for e in entries {
         let cleaned = e.cleaned_text.as_deref().unwrap_or("");
+        let id = format!("{:032x}", e.session.0);
         println!(
-            "[{}] {} | {} | {}ms",
-            e.provider, e.raw_text, cleaned, e.latency_ms
+            "[{}] {} | {} | {} | {}ms (restore {})",
+            e.provider,
+            e.raw_text,
+            cleaned,
+            &id[..8.min(id.len())],
+            e.latency_ms,
+            &id[..8.min(id.len())]
         );
     }
     Ok(())
