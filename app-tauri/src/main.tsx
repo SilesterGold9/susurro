@@ -27,6 +27,13 @@ function route(): string {
 
 function App() {
   const [routeName] = React.useState(route);
+  React.useEffect(() => {
+    // Temporary diagnosis: the titlebar names the branch until the
+    // wrong-window report is closed.
+    try {
+      document.title = `Susurro (${routeName})`;
+    } catch {}
+  }, [routeName]);
   if (routeName === "pill")
     return (
       <ErrorBoundary label={routeName}>
