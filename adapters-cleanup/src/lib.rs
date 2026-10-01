@@ -7,6 +7,7 @@
 //!   the model is missing (fail-open: always inject something).
 
 use susurro_core::ports::TextPostProcessorPort;
+use susurro_core::preserves_words;
 
 pub struct PassthroughCleanup;
 
@@ -114,62 +115,10 @@ fn strip_leading_label(s: &str) -> &str {
     }
 }
 
-/// Lowercase alphanumeric words, so "Hello," and "hello" compare equal.
-fn norm_words(s: &str) -> Vec<String> {
-    s.split(|c: char| !c.is_alphanumeric())
-        .filter(|w| !w.is_empty())
-        .map(|w| w.to_lowercase())
-        .collect()
-}
-
-/// Minimum word F1 for a cleanup to count as punctuation-only.
-/// The old rule (intersection over the longer side at 4/5) is exactly
-/// F1 at 0.8 for equal-length texts; F1 generalizes it to additions
-/// and deletions instead of special-casing length first.
-pub const F1_MINIMUM: f64 = 0.8;
-
-/// True when `cleaned` keeps the words of `raw`: punctuation-only edits
-/// score 1.0, paraphrases collapse toward 0. Punctuation and case never
-/// change the score, so a faithful model always passes and a rewriting
-/// model trips the regex fallback above.
-fn preserves_words(raw: &str, cleaned: &str) -> bool {
-    let r = norm_words(raw);
-    let mut c = norm_words(cleaned);
-    if r.is_empty() {
-        return c.is_empty();
-    }
-    if c.is_empty() || c.len() > r.len() + r.len() / 4 + 1 {
-        return false;
-    }
-    // Multiset intersection over the longer side.
-    c.sort();
-    let mut r_sorted = r.clone();
-    r_sorted.sort();
-    let (mut i, mut j, mut hit) = (0, 0, 0);
-    while i < r_sorted.len() && j < c.len() {
-        if r_sorted[i] == c[j] {
-            hit += 1;
-            i += 1;
-            j += 1;
-        } else if r_sorted[i] < c[j] {
-            i += 1;
-        } else {
-            j += 1;
-        }
-    }
-    word_f1(hit, c.len(), r_sorted.len()) >= F1_MINIMUM
-}
-
 /// Word F1 from intersection size over cleaned and raw word counts.
 /// Precision punishes added words, recall punishes dropped words.
-pub fn word_f1(hit: usize, cleaned_len: usize, raw_len: usize) -> f64 {
-    if hit == 0 || cleaned_len == 0 || raw_len == 0 {
-        return 0.0;
-    }
-    let precision = hit as f64 / cleaned_len as f64;
-    let recall = hit as f64 / raw_len as f64;
-    2.0 * precision * recall / (precision + recall)
-}
+/// Re-exported from core so every caller shares one definition.
+pub use susurro_core::word_f1;
 
 /// Request body for one Ollama `/api/chat` call, extracted for tests.
 ///
@@ -232,6 +181,7 @@ fn chat_once(endpoint: &str, model: &str, prompt: &str) -> Result<String, String
 #[cfg(test)]
 mod tests {
     use super::*;
+    use susurro_core::F1_MINIMUM;
 
     #[test]
     fn regex_collapses_and_tidies() {

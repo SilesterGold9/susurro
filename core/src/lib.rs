@@ -17,6 +17,8 @@ pub mod snippets;
 pub mod stages;
 pub mod state;
 pub mod stats;
+pub mod suggest;
+pub mod words;
 
 pub use error::CoreError;
 pub use event_log::{now_ms, EventKind, SessionEvent};
@@ -29,3 +31,5 @@ pub use snippets::{find_expansion, normalize_trigger, Snippet};
 pub use stages::{progress_for, Stage};
 pub use state::State;
 pub use stats::{day_index, day_label, percentile, summarize, DayCount, Summary};
+pub use suggest::{suggest_phrases, PhraseSuggestion};
+pub use words::{preserves_words, word_f1, F1_MINIMUM};

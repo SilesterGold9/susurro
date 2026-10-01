@@ -160,6 +160,17 @@ enum Cmd {
     DictRemove { phrase: String },
     /// List custom dictionary phrases.
     DictList,
+    /// Propose dictionary phrases learned from history corrections.
+    /// Diffs raw against cleaned, ranks by evidencing sessions, prints
+    /// the ranking. Nothing is added unless --apply is passed.
+    DictSuggest {
+        /// Write every proposed phrase to the dictionary.
+        #[arg(long, default_value_t = false)]
+        apply: bool,
+        /// Max proposals to print.
+        #[arg(long, default_value_t = 20)]
+        limit: usize,
+    },
     /// Set a spoken snippet: saying the trigger injects the expansion.
     SnippetAdd { trigger: String, expansion: String },
     /// Remove a spoken snippet by trigger.
@@ -332,6 +343,7 @@ fn main() -> anyhow::Result<()> {
         Cmd::DictAdd { phrase } => dict_add(&phrase),
         Cmd::DictRemove { phrase } => dict_remove(&phrase),
         Cmd::DictList => dict_list(),
+        Cmd::DictSuggest { apply, limit } => dict_suggest(apply, limit),
         Cmd::SnippetAdd { trigger, expansion } => snippet_add(&trigger, &expansion),
         Cmd::SnippetRemove { trigger } => snippet_remove(&trigger),
         Cmd::SnippetList => snippet_list(),
@@ -1920,6 +1932,50 @@ fn dict_list() -> anyhow::Result<()> {
             println!("- {p}");
         }
     }
+    Ok(())
+}
+
+/// Propose dictionary phrases learned from history (issue 63).
+/// Prints the frequency ranking with evidencing sessions; --apply
+/// writes every proposal. Proposals never include phrases already
+/// listed, and the guard has already rejected rewrite entries.
+fn dict_suggest(apply: bool, limit: usize) -> anyhow::Result<()> {
+    let history = susurro_storage::SqliteHistory::open(&db_path())
+        .map_err(|e| anyhow::anyhow!("Couldn't open history: {e}"))?;
+    let entries = history
+        .recent(susurro_core::suggest::SCAN_LIMIT)
+        .map_err(|e| anyhow::anyhow!("Couldn't read history: {e}"))?;
+    let dict = susurro_storage::SqliteDictionary::open(&db_path())
+        .map_err(|e| anyhow::anyhow!("Couldn't open dictionary: {e}"))?;
+    let existing = dict
+        .list()
+        .map_err(|e| anyhow::anyhow!("Couldn't list dictionary: {e}"))?;
+    let proposals = susurro_core::suggest_phrases(&entries, &existing, limit);
+    if proposals.is_empty() {
+        println!("no suggestions. Corrections whisper needs will show here.");
+        return Ok(());
+    }
+    if apply {
+        for s in &proposals {
+            dict.add(&s.phrase)
+                .map_err(|e| anyhow::anyhow!("Couldn't add phrase: {e}"))?;
+            println!("added: {}", s.phrase);
+        }
+        return Ok(());
+    }
+    for s in &proposals {
+        let sessions = s
+            .sessions
+            .iter()
+            .map(|id| {
+                let hex = susurro_core::ports::session_hex(*id);
+                hex[..8.min(hex.len())].to_string()
+            })
+            .collect::<Vec<_>>()
+            .join(", ");
+        println!("{} ({} sessions: {})", s.phrase, s.count(), sessions);
+    }
+    println!("Review, then dict-suggest --apply to write them all.");
     Ok(())
 }
 
