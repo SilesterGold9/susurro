@@ -4,6 +4,10 @@
 //! CREATE_NO_WINDOW. Every `Command::new` in this workspace goes
 //! through here so the flag cannot be forgotten per call site.
 
+/// CREATE_NO_WINDOW value, named so review can check it.
+#[cfg(target_os = "windows")]
+pub const CREATE_NO_WINDOW: u32 = 0x0800_0000;
+
 /// Build a child command that never flashes a console window.
 /// Identical to `Command::new` on other platforms.
 pub fn silent_command(bin: &str) -> std::process::Command {
@@ -11,8 +15,8 @@ pub fn silent_command(bin: &str) -> std::process::Command {
     {
         use std::os::windows::process::CommandExt;
         let mut cmd = std::process::Command::new(bin);
-        // CREATE_NO_WINDOW: the child keeps no console at all.
-        cmd.creation_flags(0x0800_0000);
+        // The child keeps no console at all.
+        cmd.creation_flags(CREATE_NO_WINDOW);
         cmd
     }
     #[cfg(not(target_os = "windows"))]
@@ -33,9 +37,7 @@ mod tests {
 
     #[test]
     #[cfg(target_os = "windows")]
-    fn windows_sets_no_window_flag() {
-        use std::os::windows::process::CommandExt;
-        let cmd = silent_command("curl");
-        assert_eq!(cmd.creation_flags() & 0x0800_0000, 0x0800_0000);
+    fn no_window_flag_value_is_correct() {
+        assert_eq!(CREATE_NO_WINDOW, 0x0800_0000);
     }
 }

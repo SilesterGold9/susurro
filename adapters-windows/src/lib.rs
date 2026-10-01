@@ -195,9 +195,8 @@ pub fn exe_stem(path: &str) -> Option<String> {
 /// coordinates. None when the area cannot be read.
 #[cfg(target_os = "windows")]
 pub fn work_area_px() -> Option<(i32, i32, i32, i32)> {
-    use windows_sys::Win32::UI::WindowsAndMessaging::{
-        SystemParametersInfoW, RECT, SPI_GETWORKAREA,
-    };
+    use windows_sys::Win32::Foundation::RECT;
+    use windows_sys::Win32::UI::WindowsAndMessaging::{SystemParametersInfoW, SPI_GETWORKAREA};
     unsafe {
         let mut rect: RECT = std::mem::zeroed();
         if SystemParametersInfoW(
