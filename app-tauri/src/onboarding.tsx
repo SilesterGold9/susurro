@@ -46,6 +46,18 @@ const HOTKEYS = [
   { name: "shift_d", label: "Shift + D" },
 ];
 
+const INTENTS = [
+  { name: "docs", label: "Documents", desc: "Formal tone for docs and writing." },
+  { name: "messages", label: "Messages", desc: "Casual tone for chat and mail." },
+  { name: "both", label: "Both", desc: "Each app sounds like itself." },
+];
+
+const TONES = [
+  { name: "formal", title: "Formal.", desc: "Caps plus punctuation." },
+  { name: "casual", title: "Casual", desc: "Light tidy, never rewritten." },
+  { name: "verbatim", title: "Verbatim", desc: "Raw transcript, untouched." },
+];
+
 export default function OnboardingView() {
   const [step, setStep] = useState(1);
   const [status, setStatus] = useState<OnboardingStatus | null>(null);
@@ -56,6 +68,8 @@ export default function OnboardingView() {
   const [busy, setBusy] = useState("");
   const [note, setNote] = useState("");
   const [confirmWipe, setConfirmWipe] = useState(false);
+  const [intent, setIntent] = useState("both");
+  const [tone, setTone] = useState("formal");
   const [display, setDisplay] = useState({ high_contrast: false, announce: true });
   const [reqs, setReqs] = useState<Requirements | null>(null);
   const [pct, setPct] = useState<number | null>(null);
@@ -141,6 +155,16 @@ export default function OnboardingView() {
     setBusy("");
   }
 
+  async function applyTone(name: string) {
+    setTone(name);
+    setNote("");
+    try {
+      const msg = await invoke<string>("apply_intent", { intent, style: name });
+      setNote(msg);
+    } catch (e) {
+      setNote(`Couldn't apply tone. ${e}`);
+    }
+  }
   async function finish() {
     setBusy("finish");
     try {
@@ -173,12 +197,46 @@ export default function OnboardingView() {
     <div className={`flow-onboard${display.high_contrast ? " high-contrast" : ""}`}>
       <h1 className="flow-title">Welcome to susurro,</h1>
       <div className="flow-sub">
-        Setup, screen {step} of 4. No tutorial, no maze.
+        Setup, screen {step} of 6. No tutorial, no maze.
+      </div>
+      <div className="flow-dots" aria-hidden="true">
+        {[1, 2, 3, 4, 5, 6].map((n) => (
+          <span key={n} className={n <= step ? "on" : ""} />
+        ))}
       </div>
 
       {step === 1 && (
         <div className="flow-card flow-pad flow-sec">
-          <h3 className="flow-h3">1. Requirements, model, speed check</h3>
+          <h3 className="flow-h3">1. What brings you here?</h3>
+          <div className="flow-sub">
+            This seeds your tone profiles, so the answer changes how
+            susurro sounds from the first dictation.
+          </div>
+          {INTENTS.map((i) => (
+            <label className="flow-check" key={i.name}>
+              <input
+                type="radio"
+                name="intent"
+                checked={intent === i.name}
+                onChange={() => setIntent(i.name)}
+                aria-label={i.label}
+              />
+              <span>
+                <strong>{i.label}.</strong> {i.desc}
+              </span>
+            </label>
+          ))}
+          <div className="row">
+            <button className="flow-dark" onClick={() => setStep(2)}>
+              next
+            </button>
+          </div>
+        </div>
+      )}
+
+      {step === 2 && (
+        <div className="flow-card flow-pad flow-sec">
+          <h3 className="flow-h3">2. Requirements, model, speed check</h3>
           <div className="flow-sub">
             {reqs ? (
               <>
@@ -238,16 +296,16 @@ export default function OnboardingView() {
             </div>
           )}
           <div className="row">
-            <button className="flow-dark" onClick={() => setStep(2)}>
+            <button className="flow-dark" onClick={() => setStep(3)}>
               next
             </button>
           </div>
         </div>
       )}
 
-      {step === 2 && (
+      {step === 3 && (
         <div className="flow-card flow-pad flow-sec">
-          <h3 className="flow-h3">2. Pick the dictation hotkey</h3>
+          <h3 className="flow-h3">3. Pick the dictation hotkey</h3>
           {HOTKEYS.map((h) => (
             <label className="flow-check" key={h.name}>
               <input
@@ -267,20 +325,54 @@ export default function OnboardingView() {
             </pre>
           </div>
           <div className="row">
-            <button className="flow-mini" onClick={() => setStep(1)}>
+            <button className="flow-mini" onClick={() => setStep(2)}>
               back
             </button>
-            <button className="flow-dark" onClick={() => setStep(3)}>
+            <button className="flow-dark" onClick={() => setStep(4)}>
               next
             </button>
           </div>
         </div>
       )}
 
-      {step === 3 && (
+      {step === 4 && (
         <div className="flow-card flow-pad flow-sec">
-          <h3 className="flow-h3">3. Test dictation (6 seconds)</h3>
-          <div className="flow-sub">Press the button, speak, and the transcript lands here.</div>
+          <h3 className="flow-h3">4. How should you sound?</h3>
+          <div className="flow-sub">
+            Pick a tone. It writes profiles for{" "}
+            {intent === "both" ? "docs and messages" : intent} right now.
+          </div>
+          <div className="flow-grid3">
+            {TONES.map((t) => (
+              <button
+                key={t.name}
+                className={`flow-card flow-pad flow-pick${tone === t.name ? " picked" : ""}`}
+                onClick={() => applyTone(t.name)}
+                aria-pressed={tone === t.name}
+              >
+                <div className="flow-serif">{t.title}</div>
+                <div className="flow-sub">{t.desc}</div>
+              </button>
+            ))}
+          </div>
+          <div className="row">
+            <button className="flow-mini" onClick={() => setStep(3)}>
+              back
+            </button>
+            <button className="flow-dark" onClick={() => setStep(5)}>
+              next
+            </button>
+          </div>
+        </div>
+      )}
+
+      {step === 5 && (
+        <div className="flow-card flow-pad flow-sec">
+          <h3 className="flow-h3">5. Test dictation (6 seconds)</h3>
+          <div className="flow-sub">
+            Your mic is the only permission this needs. Press the button,
+            speak, and the transcript lands here.
+          </div>
           <div className="row">
             <button className="flow-dark" onClick={testMic} disabled={busy === "test"}>
               {busy === "test" ? "listening..." : "speak now"}
@@ -295,26 +387,27 @@ export default function OnboardingView() {
             </div>
           )}
           <div className="row">
-            <button className="flow-mini" onClick={() => setStep(2)}>
+            <button className="flow-mini" onClick={() => setStep(4)}>
               back
             </button>
-            <button className="flow-dark" onClick={() => setStep(4)}>
+            <button className="flow-dark" onClick={() => setStep(6)}>
               next
             </button>
           </div>
         </div>
       )}
 
-      {step === 4 && (
+      {step === 6 && (
         <div className="flow-card flow-pad flow-sec">
-          <h3 className="flow-h3">4. Done</h3>
+          <h3 className="flow-h3">6. Done</h3>
           <div className="flow-sub">
             Model {status?.model_found ? "ready" : "still missing (dictation falls back to $SUSURRO_MODEL)"},
             speed tier {status?.tier || bench?.tier || "unset"},
-            hotkey {HOTKEYS.find((h) => h.name === hotkey)?.label}.
+            hotkey {HOTKEYS.find((h) => h.name === hotkey)?.label},
+            writing {tone} for {intent}.
           </div>
           <div className="row">
-            <button className="flow-mini" onClick={() => setStep(3)}>
+            <button className="flow-mini" onClick={() => setStep(5)}>
               back
             </button>
             <button className="flow-dark" onClick={finish} disabled={busy === "finish"}>
@@ -324,7 +417,7 @@ export default function OnboardingView() {
         </div>
       )}
 
-      {step === 4 && (
+      {step === 6 && (
         <div className="flow-card flow-pad flow-sec">
           <h3 className="flow-h3">Your data stays here</h3>
           <div className="flow-sub">

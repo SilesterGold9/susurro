@@ -705,6 +705,45 @@ fn save_word(phrase: String) -> Result<(), String> {
     store.add(&phrase).map_err(|e| e.to_string())
 }
 
+/// Apply an onboarding intent plus tone (revamp plan): writes real
+/// format profiles for the category app patterns. Intent answers
+/// where, the style quiz answers how, so both change behavior.
+#[tauri::command]
+fn apply_intent(intent: String, style: String) -> Result<String, String> {
+    let intent = intent.trim().to_lowercase();
+    let style = susurro_core::Style::parse(&style)?;
+    let patterns: &[&str] = match intent.as_str() {
+        "docs" => &["docs", "libreoffice", "word", "notion", "obsidian"],
+        "messages" => &[
+            "chat", "telegram", "discord", "slack", "whatsapp", "message",
+        ],
+        "both" => &[
+            "docs",
+            "libreoffice",
+            "word",
+            "notion",
+            "obsidian",
+            "chat",
+            "telegram",
+            "discord",
+            "slack",
+            "whatsapp",
+            "message",
+        ],
+        _ => return Err("unknown intent. Use docs, messages, or both.".into()),
+    };
+    let store = susurro_storage::SqliteFormatProfiles::open(&shared_db_path())
+        .map_err(|e| e.to_string())?;
+    for app in patterns {
+        store.set(app, style).map_err(|e| e.to_string())?;
+    }
+    Ok(format!(
+        "{} profiles sound {} for {intent}.",
+        patterns.len(),
+        style.as_str(),
+    ))
+}
+
 /// Remove a dictionary phrase.
 #[tauri::command]
 fn remove_word(phrase: String) -> Result<(), String> {
@@ -1447,6 +1486,7 @@ fn main() {
             list_dictionary,
             save_word,
             remove_word,
+            apply_intent,
             wipe_data,
             show_onboarding,
             onboarding_status,

@@ -20,25 +20,26 @@ short and skippable.
 
 ## Our revamp, in order
 
-1. Intent question (new screen 0). What brings you here: docs,
-   messages, or both. Docs seeds a formal profile for document
-   apps, messages seeds casual for chat apps, both seeds both.
-   One question, real behavior change, skippable.
-2. Progress indicator. Step dots across the top of every screen,
-   four today, five with intent. Setup must look brief to feel brief.
-3. Style quiz folded in. The existing Formal, Casual, Verbatim
-   cards move into onboarding as the tone question, writing a real
-   profile for the intent categories. The Style page keeps managing
+Built 2026-10-01, six screens:
+
+1. Intent question. Docs, messages, or both. `apply_intent`
+   writes real profiles for the category patterns, so the answer
+   changes behavior. Skippable by advancing untouched.
+2. Requirements, model, speed check. Whisper, model plus checksum,
+   paste tools, Ollama presence plus model, bench tier beside the
+   download with live percentage progress.
+3. Hotkey pick. Three named choices, snippet for Hyprland,
+   persisted everywhere on finish.
+4. Style quiz. Formal, Casual, Verbatim cards writing profiles for
+   the intent categories on tap. The Style page keeps managing
    them after.
-4. Mic priming before the test. One line explaining the test needs
-   the mic, then the existing six-second test as the interactive
-   moment. No separate permission API exists to call; the priming
-   is the honest version.
-5. Skip on every screen plus replay from Help. Done already for
-   skip (next buttons); replay lands with this plan.
-6. Data deletion on the Done screen. Implemented now, see below.
-7. Locked pages: skipped deliberately. No teams, no paywalls, no
-   gates. Every page works from first launch.
+5. Test dictation. Six seconds with mic priming copy, the
+   interactive moment, transcript on screen.
+6. Done plus data. Summary of everything picked, start
+   dictating, and the erase-my-data control with confirm.
+
+Progress dots across the top, skip on every screen via next and
+back, replay from Help. Locked pages skipped deliberately.
 
 ## Non-goals
 
