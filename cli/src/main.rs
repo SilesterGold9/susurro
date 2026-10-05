@@ -69,8 +69,14 @@ enum Cmd {
         /// Compute backend for local STT: auto, cpu, or openvino.
         /// Auto uses the iGPU encoder when the binary, iGPU, and
         /// runtime are all present, else CPU. Decoder always CPU.
+        /// Applies to the cli engine only; native decodes on CPU.
         #[arg(long, default_value = "auto")]
         backend: String,
+        /// Local STT engine: native (linked whisper.cpp, default) or
+        /// cli (external whisper-cli binary, for OpenVINO offload or
+        /// distro builds).
+        #[arg(long, default_value = "native")]
+        engine: String,
         /// Race cloud against local STT: first success wins. Needs a
         /// configured cloud key and a reachable network; otherwise the
         /// run stays on the normal chain. Costs the slowest side.
@@ -120,8 +126,14 @@ enum Cmd {
         /// Compute backend for local STT: auto, cpu, or openvino.
         /// Auto uses the iGPU encoder when the binary, iGPU, and
         /// runtime are all present, else CPU. Decoder always CPU.
+        /// Applies to the cli engine only; native decodes on CPU.
         #[arg(long, default_value = "auto")]
         backend: String,
+        /// Local STT engine: native (linked whisper.cpp, default) or
+        /// cli (external whisper-cli binary, for OpenVINO offload or
+        /// distro builds).
+        #[arg(long, default_value = "native")]
+        engine: String,
         /// Race cloud against local STT: first success wins. Needs a
         /// configured cloud key and a reachable network; otherwise the
         /// run stays on the normal chain. Costs the slowest side.
@@ -147,6 +159,29 @@ enum Cmd {
     /// Verify the whisper model checksum (trust on first use, compare
     /// after). Fails when the file is missing or corrupted.
     ModelCheck,
+    /// Converge the provisioning plane: fetch every manifest asset
+    /// that is missing or the wrong size, then retry on a backoff
+    /// timer until everything is on disk or a failure needs a human.
+    /// --once runs a single pass and exits.
+    Converge {
+        /// One pass, no retry timer.
+        #[arg(long, default_value_t = false)]
+        once: bool,
+        /// Re-fetch even when a verified copy exists.
+        #[arg(long, default_value_t = false)]
+        force: bool,
+    },
+    /// Fetch a whisper model through the provisioning plane: resume,
+    /// hash-while-write, atomic swap. Skips when a live copy exists
+    /// unless --force. Records trust-on-first-use plus manifest version.
+    ModelFetch {
+        /// Fetch the tiny model instead of base.
+        #[arg(long, default_value_t = false)]
+        tiny: bool,
+        /// Re-download even when a live copy exists.
+        #[arg(long, default_value_t = false)]
+        force: bool,
+    },
     /// Erase user data: history, events, tickets, dictionary,
     /// privacy additions, profiles, snippets. Needs --yes.
     Wipe {
@@ -256,6 +291,7 @@ fn main() -> anyhow::Result<()> {
             app,
             live,
             backend,
+            engine,
             turbo,
         } => listen_real(&ListenOpts {
             seconds,
@@ -270,6 +306,7 @@ fn main() -> anyhow::Result<()> {
             app,
             live,
             backend,
+            engine,
             turbo,
             mock_text: "hello from susurro".into(),
         }),
@@ -288,6 +325,7 @@ fn main() -> anyhow::Result<()> {
             app,
             live,
             backend,
+            engine,
             turbo,
         } => daemon(
             &socket,
@@ -305,6 +343,7 @@ fn main() -> anyhow::Result<()> {
                 app,
                 live,
                 backend,
+                engine,
                 turbo,
                 mock_text: "hello from susurro".into(),
             },
@@ -339,6 +378,8 @@ fn main() -> anyhow::Result<()> {
         Cmd::History { limit } => show_history(limit),
         Cmd::Stats => show_stats(),
         Cmd::ModelCheck => model_check(),
+        Cmd::Converge { once, force } => converge(once, force),
+        Cmd::ModelFetch { tiny, force } => model_fetch(tiny, force),
         Cmd::Wipe { yes } => wipe(yes),
         Cmd::DictAdd { phrase } => dict_add(&phrase),
         Cmd::DictRemove { phrase } => dict_remove(&phrase),
@@ -377,6 +418,7 @@ struct ListenOpts {
     app: Option<String>,
     live: bool,
     backend: String,
+    engine: String,
     turbo: bool,
     mock_text: String,
 }
@@ -648,9 +690,15 @@ fn doctor() -> anyhow::Result<()> {
         println!("audio server: {server} — install pw-record or parecord for device routing");
     }
     println!("tools:");
+    // The native engine is linked in: no binary to install. whisper-cli
+    // only matters for the --engine cli escape hatch.
+    println!(
+        "native engine: linked (whisper.cpp {})",
+        susurro_adapters_stt_local::native::linked_version()
+    );
     // Cross-platform first, OS extras after: probing Linux-only
     // tools on Windows is noise, not diagnosis.
-    for tool in ["whisper-cli", "curl", "ollama"] {
+    for tool in ["curl", "ollama"] {
         let found = which(tool);
         println!(
             "{}: {}",
@@ -686,9 +734,9 @@ fn doctor() -> anyhow::Result<()> {
     #[cfg(target_os = "windows")]
     println!("paste: SendInput direct-type (no external tools needed)");
     match whisper_cli_version() {
-        Some(v) => println!("whisper-cli version: {v}"),
+        Some(v) => println!("whisper-cli binary: {v} (--engine cli available)"),
         None => {
-            println!("whisper-cli version: unknown — install a whisper-cli that reports --version")
+            println!("whisper-cli binary: absent — only needed for --engine cli")
         }
     }
     #[cfg(target_os = "linux")]
@@ -750,6 +798,69 @@ fn doctor() -> anyhow::Result<()> {
         );
     }
     println!("model checksums: {}", model_checksum_line(&model));
+    println!("provision:");
+    // Asset matrix (Phase 3): every manifest asset, every copy on
+    // disk, plus the recorded manifest version. Same report the
+    // System page renders; size is the cheap signal, model-check
+    // stays the content proof.
+    {
+        let manifest = susurro_provision::default_manifest();
+        if let Some(h) = home.as_deref() {
+            let dir = std::path::PathBuf::from(h).join(".local/share/susurro/models");
+            for asset_health in susurro_provision::health(&manifest, &dir, None) {
+                if asset_health.copies.is_empty() {
+                    println!("asset {}: missing", asset_health.name);
+                    continue;
+                }
+                for copy in &asset_health.copies {
+                    println!(
+                        "asset {}: {} (v{}, {})",
+                        asset_health.name,
+                        copy.path,
+                        asset_health.version,
+                        if copy.bytes_ok {
+                            "size ok"
+                        } else {
+                            "size mismatch"
+                        },
+                    );
+                }
+            }
+        }
+        if let Ok(store) = susurro_storage::SqliteSettings::open(&db_path()) {
+            use susurro_core::ports::SettingsStorePort;
+            for asset in &manifest.assets {
+                let key = format!("asset_version:{}", asset.name);
+                match store.get(&key) {
+                    Ok(Some(v)) => println!("asset {}: manifest version {v}", asset.name),
+                    _ => println!("asset {}: version unrecorded", asset.name),
+                }
+            }
+        }
+    }
+    // Convergence state (ADR-004 point 5): what the retry loop is
+    // holding and when it next acts. Read-only, so doctor stays a
+    // report and never starts a download.
+    {
+        use susurro_provision::ConvergeState;
+        if let Some(home) = home.as_deref() {
+            let dir = std::path::PathBuf::from(home).join(".local/share/susurro/models");
+            let state = ConvergeState::load(&dir);
+            if state.assets.is_empty() {
+                println!("convergence: no recorded failures");
+            } else {
+                for (name, failure) in &state.assets {
+                    println!(
+                        "convergence {name}: {:?}, attempt {}, next in {}s",
+                        failure.category,
+                        failure.attempts,
+                        susurro_provision::backoff_secs(failure.attempts)
+                    );
+                }
+                println!("converge with: susurro converge");
+            }
+        }
+    }
     println!("compute:");
     // Compute runtimes (v0.5.0, issue 29): everything the backend
     // selection depends on, in one place. Each line names the fact
@@ -1082,7 +1193,7 @@ impl susurro_core::ports::TextInjectionPort for StdoutInjector {
 enum LiveDecoder {
     Mock(MockSttOnce),
     #[cfg(target_os = "linux")]
-    Windowed(susurro_adapters_stt_local::WindowedPartial),
+    Windowed(Box<dyn SpeechToTextPort>),
 }
 
 #[cfg(target_os = "linux")]
@@ -1091,8 +1202,68 @@ impl LiveDecoder {
         match self {
             Self::Mock(m) => m,
             #[cfg(target_os = "linux")]
-            Self::Windowed(w) => w,
+            Self::Windowed(w) => w.as_ref(),
         }
+    }
+}
+
+/// Owned local engine: native decodes in process, cli shells out.
+/// Speaks through the port either way, so chains and turbo never
+/// branch on it.
+enum LocalStt {
+    Native(susurro_adapters_stt_local::native::WhisperNative),
+    Cli(susurro_adapters_stt_local::WhisperLocal),
+}
+
+impl SpeechToTextPort for LocalStt {
+    fn transcribe(
+        &self,
+        pcm: &[i16],
+    ) -> Result<susurro_core::ports::Transcript, susurro_core::CoreError> {
+        match self {
+            Self::Native(n) => n.transcribe(pcm),
+            Self::Cli(c) => c.transcribe(pcm),
+        }
+    }
+
+    fn model_name(&self) -> &str {
+        match self {
+            Self::Native(n) => n.model_name(),
+            Self::Cli(c) => c.model_name(),
+        }
+    }
+
+    fn transcribe_partial(
+        &self,
+        pcm: &[i16],
+    ) -> Option<Result<susurro_core::ports::Transcript, susurro_core::CoreError>> {
+        match self {
+            Self::Native(n) => n.transcribe_partial(pcm),
+            Self::Cli(c) => c.transcribe_partial(pcm),
+        }
+    }
+}
+
+/// Build the local engine for a run. Native ignores the compute
+/// backend (linked CPU decode); the cli engine honors it for the
+/// OpenVINO offload path.
+fn local_stt(
+    engine: susurro_adapters_stt_local::LocalEngine,
+    model_path: &str,
+    dict_prompt: &str,
+    backend: &susurro_adapters_stt_local::openvino::SttBackend,
+) -> LocalStt {
+    use susurro_adapters_stt_local::LocalEngine;
+    match engine {
+        LocalEngine::Native => LocalStt::Native(
+            susurro_adapters_stt_local::native::WhisperNative::base_en(model_path.into())
+                .with_prompt(dict_prompt),
+        ),
+        LocalEngine::Cli => LocalStt::Cli(
+            susurro_adapters_stt_local::WhisperLocal::base_en(model_path.into())
+                .with_prompt(dict_prompt)
+                .with_backend(backend.clone()),
+        ),
     }
 }
 
@@ -1104,6 +1275,7 @@ fn build_live_decoder(
     model_path: &str,
     dict_prompt: &str,
     backend: &susurro_adapters_stt_local::openvino::SttBackend,
+    engine: susurro_adapters_stt_local::LocalEngine,
 ) -> Option<LiveDecoder> {
     if !opts.live {
         return None;
@@ -1114,12 +1286,20 @@ fn build_live_decoder(
             partial_calls: Default::default(),
         }))
     } else {
-        let whisper = susurro_adapters_stt_local::WhisperLocal::base_en(model_path.into())
-            .with_prompt(dict_prompt)
-            .with_backend(backend.clone());
-        Some(LiveDecoder::Windowed(
-            susurro_adapters_stt_local::WindowedPartial::new(whisper),
-        ))
+        use susurro_adapters_stt_local::{
+            native::WhisperNative, LocalEngine, WhisperLocal, WindowedPartial,
+        };
+        let boxed: Box<dyn SpeechToTextPort> = match engine {
+            LocalEngine::Native => Box::new(WindowedPartial::new(
+                WhisperNative::base_en(model_path.into()).with_prompt(dict_prompt),
+            )),
+            LocalEngine::Cli => Box::new(WindowedPartial::new(
+                WhisperLocal::base_en(model_path.into())
+                    .with_prompt(dict_prompt)
+                    .with_backend(backend.clone()),
+            )),
+        };
+        Some(LiveDecoder::Windowed(boxed))
     }
 }
 
@@ -1219,6 +1399,10 @@ fn run_utterance(opts: &ListenOpts, tickets: &TicketRegistry) -> anyhow::Result<
     let backend_request =
         susurro_adapters_stt_local::openvino::BackendRequest::parse(&opts.backend)
             .map_err(|e| anyhow::anyhow!("{e}"))?;
+    // Engine (Phase 1, ADR-004): validated at the edge like the
+    // backend flag. Native decodes in process; cli shells out.
+    let engine = susurro_adapters_stt_local::LocalEngine::parse(&opts.engine)
+        .map_err(|e| anyhow::anyhow!("{e}"))?;
     let (local_backend, backend_warning) = if opts.mock {
         (susurro_adapters_stt_local::openvino::SttBackend::Cpu, None)
     } else {
@@ -1244,6 +1428,14 @@ fn run_utterance(opts: &ListenOpts, tickets: &TicketRegistry) -> anyhow::Result<
     if let Some(w) = &backend_warning {
         eprintln!("backend: {w}");
     }
+    if engine == susurro_adapters_stt_local::LocalEngine::Native
+        && matches!(
+            local_backend,
+            susurro_adapters_stt_local::openvino::SttBackend::OpenVino { .. }
+        )
+    {
+        eprintln!("backend: openvino applies to the cli engine; native decodes on CPU.");
+    }
     let mut capture: Box<dyn AudioCapturePort> = if opts.mock {
         Box::new(MockCaptureOnce {
             text_len: 1600,
@@ -1252,7 +1444,7 @@ fn run_utterance(opts: &ListenOpts, tickets: &TicketRegistry) -> anyhow::Result<
     } else if opts.auto_stop {
         #[cfg(target_os = "linux")]
         {
-            let live = build_live_decoder(opts, &model_path, &dict_prompt, &local_backend);
+            let live = build_live_decoder(opts, &model_path, &dict_prompt, &local_backend, engine);
             let (pcm, _) = record_with_auto_stop(opts, &cues, live.as_ref().map(|d| d.as_stt()))?;
             Box::new(started_buffer(pcm)?)
         }
@@ -1359,9 +1551,7 @@ fn run_utterance(opts: &ListenOpts, tickets: &TicketRegistry) -> anyhow::Result<
             if opts.turbo {
                 eprintln!("turbo needs a cloud key: no providers, staying local.");
             }
-            real_stt = susurro_adapters_stt_local::WhisperLocal::base_en(model_path.into())
-                .with_prompt(&dict_prompt)
-                .with_backend(local_backend.clone());
+            real_stt = local_stt(engine, &model_path, &dict_prompt, &local_backend);
             chain_ref = None;
             turbo_ref = None;
             &real_stt
@@ -1381,10 +1571,7 @@ fn run_utterance(opts: &ListenOpts, tickets: &TicketRegistry) -> anyhow::Result<
                     let _ips = susurro_adapters_stt_cloud::preresolve_host(&h).ok();
                 }
             }
-            let local =
-                susurro_adapters_stt_local::WhisperLocal::base_en(model_path.clone().into())
-                    .with_prompt(&dict_prompt)
-                    .with_backend(local_backend.clone());
+            let local = local_stt(engine, &model_path, &dict_prompt, &local_backend);
             let mut chain = susurro_adapters_stt_cloud::SttFallbackChain::new(Box::new(local));
             if let Some(cfg) = groq_cfg {
                 chain = chain.add_provider(
@@ -1409,10 +1596,7 @@ fn run_utterance(opts: &ListenOpts, tickets: &TicketRegistry) -> anyhow::Result<
             // keeps its own local fallback; turbo adds the racer.
             if opts.turbo {
                 eprintln!("turbo: racing cloud vs local, first success wins.");
-                turbo_local =
-                    susurro_adapters_stt_local::WhisperLocal::base_en(model_path.clone().into())
-                        .with_prompt(&dict_prompt)
-                        .with_backend(local_backend.clone());
+                turbo_local = local_stt(engine, &model_path, &dict_prompt, &local_backend);
                 turbo_stt = susurro_adapters_stt_cloud::TurboStt::new(&chain_stt, &turbo_local);
                 turbo_ref = Some(&turbo_stt);
                 &turbo_stt
@@ -1801,6 +1985,131 @@ fn model_check() -> anyhow::Result<()> {
         }
         Err(e) => anyhow::bail!("model checksum unverified: {e}"),
     }
+}
+
+/// Models dir, shared by converge, doctor, and model-fetch. None
+/// means no home dir on this machine, which each caller reports in
+/// its own words.
+fn models_dir() -> anyhow::Result<std::path::PathBuf> {
+    let home = std::env::var("HOME")
+        .or_else(|_| std::env::var("USERPROFILE"))
+        .map_err(|_| anyhow::anyhow!("no home dir on this machine"))?;
+    Ok(std::path::PathBuf::from(home).join(".local/share/susurro/models"))
+}
+
+/// Converge the plane (ADR-004 point 5). The loop itself lives in
+/// `susurro-provision`; this is the CLI's cadence: `--once` for a
+/// single pass, otherwise retry on the backoff the plane reports.
+/// Blocked assets never schedule a retry, so a denied disk stops the
+/// loop instead of hammering it.
+fn converge(once: bool, force: bool) -> anyhow::Result<()> {
+    use susurro_provision::{AssetState, Converger};
+    let dir = models_dir()?;
+    let manifest = susurro_provision::default_manifest();
+    let mut converger = Converger::new(manifest, dir, None).with_force(force);
+    let print = |report: &susurro_provision::Convergence| {
+        for asset in &report.assets {
+            let line = match &asset.state {
+                AssetState::Ready { path } => format!("ready    {} ({path})", asset.name),
+                AssetState::Fetched { path } => format!("fetched  {} ({path})", asset.name),
+                AssetState::Waiting {
+                    category,
+                    retry_in_secs,
+                    ..
+                } => format!(
+                    "waiting  {} ({category:?}, retry in {retry_in_secs}s)",
+                    asset.name
+                ),
+                AssetState::Blocked { category, detail } => {
+                    format!("blocked  {} ({category:?}: {detail})", asset.name)
+                }
+            };
+            println!("{line}");
+        }
+        if report.converged {
+            println!("converged: every manifest asset is on disk.");
+        } else {
+            for asset in &report.assets {
+                if let AssetState::Blocked { category, .. } = asset.state {
+                    println!("fix: {}", category.remedy());
+                }
+            }
+        }
+    };
+    if once {
+        let report = converger.converge(&|_| {})?;
+        print(&report);
+        return Ok(());
+    }
+    // The pass budget bounds a dead network: the plane already skips
+    // sleeping after the last pass, so this returns rather than
+    // hanging on the backoff.
+    let converged = std::cell::Cell::new(None);
+    converger.run_until_converged(
+        8,
+        &|| false,
+        &|d| {
+            println!("retrying in {}s", d.as_secs());
+            std::thread::sleep(d);
+            false
+        },
+        &|report| {
+            print(report);
+            converged.set(Some(report.converged));
+        },
+    );
+    match converged.get() {
+        Some(true) => Ok(()),
+        Some(false) => anyhow::bail!("convergence incomplete; run `susurro doctor` for the fix."),
+        None => anyhow::bail!("convergence gave up before finishing; see the lines above."),
+    }
+}
+
+/// Fetch a model through the provisioning plane (Phase 0, ADR-004).
+/// Same machinery the GUI download button uses: resume from partial,
+/// hash while writing, atomic swap with the previous copy kept as
+/// `.prev`. Trust-on-first-use and the manifest version persist after.
+fn model_fetch(tiny: bool, force: bool) -> anyhow::Result<()> {
+    use susurro_adapters_stt_local::checksum::{verify_model, VerifyOutcome};
+    use susurro_core::ports::SettingsStorePort;
+    let name = if tiny { "tiny.en.bin" } else { "base.en.bin" };
+    let manifest = susurro_provision::default_manifest();
+    let asset = susurro_provision::select_asset(&manifest, name)
+        .ok_or_else(|| anyhow::anyhow!("{name} vanished from the asset manifest"))?;
+    let home = std::env::var("HOME")
+        .or_else(|_| std::env::var("USERPROFILE"))
+        .map_err(|_| anyhow::anyhow!("no home dir on this machine"))?;
+    let dir = std::path::PathBuf::from(home).join(".local/share/susurro/models");
+    let last = std::cell::Cell::new(0u64);
+    let path = susurro_provision::ensure_asset(&dir, asset, force, &|done, total| match total
+        .filter(|t| *t > 0)
+    {
+        Some(total) => {
+            let pct = done.saturating_mul(100) / total;
+            if pct > last.get() {
+                last.set(pct);
+                eprintln!("fetching {name}: {pct}% ({done}/{total} bytes)");
+            }
+        }
+        None => eprintln!("fetching {name}: {done} bytes"),
+    })
+    .map_err(|e| anyhow::anyhow!("{e}"))?;
+    let mut store = susurro_storage::SqliteSettings::open(&db_path())
+        .map_err(|e| anyhow::anyhow!("Couldn't open settings: {e}"))?;
+    match verify_model(&path, &mut store) {
+        Ok(VerifyOutcome::Matched(h)) => println!("model ready: {} (verified {h})", path.display()),
+        Ok(VerifyOutcome::Recorded(h)) => {
+            println!("model ready: {} (trust recorded {h})", path.display())
+        }
+        Ok(VerifyOutcome::Mismatch { expected, actual }) => {
+            anyhow::bail!("model ready but checksum MISMATCH: expected {expected}, got {actual}. Re-run with --force.")
+        }
+        Err(e) => anyhow::bail!("model fetched but unverified: {e}"),
+    }
+    store
+        .set(&format!("asset_version:{name}"), &asset.version)
+        .map_err(|e| anyhow::anyhow!("Couldn't record asset version: {e}"))?;
+    Ok(())
 }
 
 /// Erase user data for a fresh start. Without --yes, prints what
