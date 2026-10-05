@@ -8,6 +8,7 @@ members = [
   "adapters-linux",
   "adapters-windows",
   "storage",
+  "provision",
   "cli",
   "contracts",
 ]

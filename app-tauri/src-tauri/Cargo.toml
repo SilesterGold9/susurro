@@ -5,6 +5,7 @@ edition = "2021"
 
 [build-dependencies]
 tauri-build = { version = "2", features = [] }
+susurro-provision = { path = "../../provision" }
 
 [dependencies]
 tauri = { version = "2", features = ["tray-icon"] }
@@ -19,6 +20,7 @@ susurro-adapters-cleanup = { path = "../../adapters-cleanup" }
 susurro-adapters-linux = { path = "../../adapters-linux" }
 susurro-adapters-windows = { path = "../../adapters-windows" }
 susurro-storage = { path = "../../storage" }
+susurro-provision = { path = "../../provision" }
 
 [features]
 default = ["custom-protocol"]

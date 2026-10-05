@@ -41,6 +41,19 @@ Never ship a release signed by a key whose public half is not
 already in the previous release. The bridge release is what makes
 that true.
 
+## Asset manifest key
+
+Model and asset files verify against a second Ed25519 keypair,
+`susurro-assets-1`, owned by the provisioning plane (`provision/`,
+ADR-004). The public half is embedded as `ASSET_PUBLIC_KEY_HEX` and
+verifies every remote manifest; the secret half signs manifests at
+release time and lives in the password manager (later the release
+secrets beside `TAURI_SIGNING_PRIVATE_KEY`). It never enters the repo.
+Rotation follows the same bridge procedure: new key id, new embedded
+public key in a release the old clients accept first, then manifests
+move to the new id. Old clients reject the unknown key id loudly
+instead of trusting bytes they cannot verify.
+
 ## Emergency rotation
 
 On exposure, rotate first and announce second: run the procedure above,
