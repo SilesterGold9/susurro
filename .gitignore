@@ -11,6 +11,11 @@ app-tauri/src-tauri/target/
 .tauri-key
 # whisper models + ollama are user-local
 models/
+# day-0 bundle model: fetched by src-tauri/build.rs, pinned by hash
+app-tauri/src-tauri/resources/models/
 
-# local agent scaffolding (Conclave), not part of releases
-.opencode/
+# local agent scaffolding (Conclave) — installed files stay local,
+# but constitution + ledger are versioned precedent
+.opencode/*
+!.opencode/constitution.md
+!.opencode/ledger/
