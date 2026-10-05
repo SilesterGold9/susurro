@@ -1,5 +1,7 @@
 import { useEffect, useState } from "react";
 import { invoke } from "@tauri-apps/api/core";
+import { Button } from "@/components/ui/button";
+import { Input } from "@/components/ui/input";
 
 interface Snippet {
   trigger: string;
@@ -58,12 +60,11 @@ export default function SnippetsPage() {
       <div className="flow-head">
         <h1 className="flow-title">Snippets</h1>
         <div className="row">
-          <input
+          <Input
             value={filter}
             onChange={(e) => setFilter(e.target.value)}
             placeholder="Search snippets"
             aria-label="search snippets"
-            className="flow-search"
           />
         </div>
       </div>
@@ -75,23 +76,21 @@ export default function SnippetsPage() {
             trigger, get the expansion.
           </p>
           <div className="row">
-            <input
+            <Input
               value={trigger}
               onChange={(e) => setTrigger(e.target.value)}
               placeholder="say this"
               aria-label="snippet trigger"
-              className="flow-search"
             />
-            <input
+            <Input
               value={expansion}
               onChange={(e) => setExpansion(e.target.value)}
               placeholder="get this"
               aria-label="snippet expansion"
-              className="flow-search"
             />
-            <button className="flow-light" onClick={add}>
+            <Button variant="paper" onClick={add}>
               Add snippet
-            </button>
+            </Button>
           </div>
         </div>
       </div>
@@ -103,13 +102,14 @@ export default function SnippetsPage() {
               {r.trigger} <span className="flow-arrow">→</span> {r.expansion}
             </span>
             <span className="flow-actions">
-              <button
-                className="flow-mini"
+              <Button
+                variant="outline"
+                size="xs"
                 onClick={() => remove(r.trigger)}
                 aria-label={`remove ${r.trigger}`}
               >
                 Remove
-              </button>
+              </Button>
             </span>
           </div>
         ))}

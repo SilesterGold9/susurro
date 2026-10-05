@@ -6,6 +6,7 @@ import OnboardingView from "./onboarding";
 import Shell from "./shell";
 import { ErrorBoundary } from "./errorbound";
 import "./styles.css";
+import "./index.css";
 
 function route(): string {
   // Hash first: it needs no API call, so the branch is right even

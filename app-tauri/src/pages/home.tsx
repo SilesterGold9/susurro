@@ -2,6 +2,7 @@ import { useEffect, useState } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import type { Page } from "../shell";
 import type { HistoryRow, UsageStats } from "../settings";
+import { Button } from "@/components/ui/button";
 
 interface Group {
   label: string;
@@ -72,9 +73,9 @@ export default function HomePage({ go }: { go: (p: Page) => void }) {
           <div className="flow-hero-text">
             <h2>Make susurro sound like you</h2>
             <p>Set up different writing styles for different apps.</p>
-            <button className="flow-light" onClick={() => go("style")}>
+            <Button variant="paper" onClick={() => go("style")}>
               Start now
-            </button>
+            </Button>
           </div>
         </div>
         {note && <div className="flow-note">{note}</div>}
@@ -89,21 +90,23 @@ export default function HomePage({ go }: { go: (p: Page) => void }) {
                     {r.cleaned_text || r.raw_text}
                   </span>
                   <span className="flow-actions">
-                    <button
-                      className="flow-mini"
+                    <Button
+                      variant="outline"
+                      size="xs"
                       onClick={() => copy(r.cleaned_text || r.raw_text)}
                       aria-label="copy transcript"
                     >
                       Copy
-                    </button>
+                    </Button>
                     {r.cleaned_text && r.cleaned_text !== r.raw_text && (
-                      <button
-                        className="flow-mini"
+                      <Button
+                        variant="outline"
+                        size="xs"
                         onClick={() => restore(r.session)}
                         aria-label="restore raw transcript"
                       >
                         Raw
-                      </button>
+                      </Button>
                     )}
                   </span>
                 </div>

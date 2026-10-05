@@ -1,6 +1,7 @@
 import { useEffect, useState } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import type { UsageStats } from "../settings";
+import { Progress } from "@/components/ui/progress";
 
 export default function InsightsPage() {
   const [stats, setStats] = useState<UsageStats | null>(null);
@@ -45,12 +46,11 @@ export default function InsightsPage() {
           {stats.days.map((d) => (
             <div key={d.label} className="flow-bar-row">
               <span className="flow-bar-label">{d.label}</span>
-              <span className="flow-bar-track">
-                <span
-                  className="flow-bar-fill"
-                  style={{ width: `${Math.round((d.words / maxDay) * 100)}%` }}
-                />
-              </span>
+              <Progress
+                value={Math.round((d.words / maxDay) * 100)}
+                aria-label={`${d.label}: ${d.words} words`}
+                className="flex-1"
+              />
               <span className="flow-bar-num">{d.words}</span>
             </div>
           ))}

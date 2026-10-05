@@ -1,6 +1,9 @@
 import { useEffect, useState } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import type { FormatProfileRow } from "../settings";
+import { Button } from "@/components/ui/button";
+import { Card } from "@/components/ui/card";
+import { Input } from "@/components/ui/input";
 
 const STYLES = [
   { name: "formal", title: "Formal.", desc: "Caps plus punctuation, full polish." },
@@ -56,28 +59,28 @@ export default function StylePage() {
       </p>
       <div className="flow-grid3">
         {STYLES.map((s) => (
-          <button
-            key={s.name}
-            className={`flow-card flow-pad flow-pick${style === s.name ? " picked" : ""}`}
-            onClick={() => setStyle(s.name)}
-            aria-pressed={style === s.name}
-          >
-            <div className="flow-serif">{s.title}</div>
-            <div className="flow-sub">{s.desc}</div>
-          </button>
+          <Card key={s.name} asChild selected={style === s.name}>
+            <button
+              onClick={() => setStyle(s.name)}
+              aria-pressed={style === s.name}
+              className="w-full cursor-pointer text-left"
+            >
+              <div className="flow-serif">{s.title}</div>
+              <div className="flow-sub">{s.desc}</div>
+            </button>
+          </Card>
         ))}
       </div>
       <div className="row">
-        <input
+        <Input
           value={app}
           onChange={(e) => setApp(e.target.value)}
           placeholder="app pattern, e.g. docs"
           aria-label="app pattern"
-          className="flow-search"
         />
-        <button className="flow-dark" onClick={save}>
+        <Button variant="ink" onClick={save}>
           Save profile
-        </button>
+        </Button>
       </div>
       {note && <div className="flow-note">{note}</div>}
       <div className="flow-card">
@@ -87,13 +90,14 @@ export default function StylePage() {
               {r.app} <span className="flow-arrow">→</span> {r.style}
             </span>
             <span className="flow-actions">
-              <button
-                className="flow-mini"
+              <Button
+                variant="outline"
+                size="xs"
                 onClick={() => remove(r.app)}
                 aria-label={`remove ${r.app}`}
               >
                 Remove
-              </button>
+              </Button>
             </span>
           </div>
         ))}

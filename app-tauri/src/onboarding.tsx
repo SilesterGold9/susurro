@@ -3,6 +3,17 @@ import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
 import { getCurrentWindow } from "@tauri-apps/api/window";
 import type { Settings } from "./settings";
+import { Button } from "@/components/ui/button";
+import { Card } from "@/components/ui/card";
+import {
+  Dialog,
+  DialogClose,
+  DialogContent,
+  DialogDescription,
+  DialogTitle,
+  DialogTrigger,
+} from "@/components/ui/dialog";
+import { Progress } from "@/components/ui/progress";
 
 interface Requirements {
   os: string;
@@ -67,7 +78,7 @@ export default function OnboardingView() {
   const [testOut, setTestOut] = useState<TestResult | null>(null);
   const [busy, setBusy] = useState("");
   const [note, setNote] = useState("");
-  const [confirmWipe, setConfirmWipe] = useState(false);
+  const [wipeOpen, setWipeOpen] = useState(false);
   const [intent, setIntent] = useState("both");
   const [tone, setTone] = useState("formal");
   const [display, setDisplay] = useState({ high_contrast: false, announce: true });
@@ -95,6 +106,10 @@ export default function OnboardingView() {
 
   useEffect(() => {
     refresh();
+    // Base streams in the background from first paint: the user
+    // answers intent, tone, and hotkey while bytes arrive. The tiny
+    // model is already on board, so nothing here blocks on network.
+    invoke<string>("start_model_prefetch").catch(() => {});
     const off = listen<{ step: string; state: string; pct?: number }>(
       "susurro://onboarding",
       (e) => {
@@ -177,15 +192,11 @@ export default function OnboardingView() {
   }
 
   async function wipe() {
-    if (!confirmWipe) {
-      setConfirmWipe(true);
-      return;
-    }
     setBusy("wipe");
     try {
       const msg = await invoke<string>("wipe_data");
       setNote(msg);
-      setConfirmWipe(false);
+      setWipeOpen(false);
       await refresh();
     } catch (e) {
       setNote(`Couldn't wipe data. ${e}`);
@@ -227,9 +238,9 @@ export default function OnboardingView() {
             </label>
           ))}
           <div className="row">
-            <button className="flow-dark" onClick={() => setStep(2)}>
+            <Button variant="ink" onClick={() => setStep(2)}>
               next
-            </button>
+            </Button>
           </div>
         </div>
       )}
@@ -260,32 +271,35 @@ export default function OnboardingView() {
             )}
           </div>
           <div className="row">
-            <button className="flow-mini" onClick={refresh} aria-label="recheck requirements">
+            <Button variant="outline" size="sm" onClick={refresh} aria-label="recheck requirements">
               recheck
-            </button>
+            </Button>
           </div>
           <div className="flow-sub">
             {status
               ? status.model_found
                 ? `model found: ${status.model_path}. Checksum ${status.model_checksum}.`
-                : `model missing: ${status.model_path}. Download base.en to continue.`
+                : `model still arriving: the built-in tiny already dictates, base.en streams in the background.`
               : "checking model..."}
           </div>
           <div className="row">
-            <button
-              className="flow-dark"
+            <Button
+              variant="ink"
               onClick={download}
-              disabled={busy === "model" || !!status?.model_found}
+              loading={busy === "model"}
+              disabled={!!status?.model_found}
             >
-              {busy === "model" ? "downloading..." : "download model"}
-            </button>
-            <button className="flow-mini" onClick={runBench} disabled={busy === "bench"}>
+              {busy === "model" ? "downloading..." : "fetch base now"}
+            </Button>
+            <Button variant="outline" size="sm" onClick={runBench} loading={busy === "bench"}>
               {busy === "bench" ? "measuring..." : "run speed check"}
-            </button>
+            </Button>
           </div>
           {pct !== null && (
-            <div className="flow-sub" aria-live="polite">
-              downloading model: {pct}%.
+            <div className="flow-bar-row" aria-live="polite">
+              <span className="flow-bar-label">downloading model</span>
+              <Progress value={pct} aria-label={`downloading model: ${pct} percent`} className="flex-1" />
+              <span className="flow-bar-num">{pct}%</span>
             </div>
           )}
           {(bench || status?.tier) && (
@@ -296,9 +310,9 @@ export default function OnboardingView() {
             </div>
           )}
           <div className="row">
-            <button className="flow-dark" onClick={() => setStep(3)}>
+            <Button variant="ink" onClick={() => setStep(3)}>
               next
-            </button>
+            </Button>
           </div>
         </div>
       )}
@@ -325,12 +339,12 @@ export default function OnboardingView() {
             </pre>
           </div>
           <div className="row">
-            <button className="flow-mini" onClick={() => setStep(2)}>
+            <Button variant="outline" size="sm" onClick={() => setStep(2)}>
               back
-            </button>
-            <button className="flow-dark" onClick={() => setStep(4)}>
+            </Button>
+            <Button variant="ink" onClick={() => setStep(4)}>
               next
-            </button>
+            </Button>
           </div>
         </div>
       )}
@@ -344,24 +358,25 @@ export default function OnboardingView() {
           </div>
           <div className="flow-grid3">
             {TONES.map((t) => (
-              <button
-                key={t.name}
-                className={`flow-card flow-pad flow-pick${tone === t.name ? " picked" : ""}`}
-                onClick={() => applyTone(t.name)}
-                aria-pressed={tone === t.name}
-              >
-                <div className="flow-serif">{t.title}</div>
-                <div className="flow-sub">{t.desc}</div>
-              </button>
+              <Card key={t.name} asChild selected={tone === t.name}>
+                <button
+                  onClick={() => applyTone(t.name)}
+                  aria-pressed={tone === t.name}
+                  className="w-full cursor-pointer text-left"
+                >
+                  <div className="flow-serif">{t.title}</div>
+                  <div className="flow-sub">{t.desc}</div>
+                </button>
+              </Card>
             ))}
           </div>
           <div className="row">
-            <button className="flow-mini" onClick={() => setStep(3)}>
+            <Button variant="outline" size="sm" onClick={() => setStep(3)}>
               back
-            </button>
-            <button className="flow-dark" onClick={() => setStep(5)}>
+            </Button>
+            <Button variant="ink" onClick={() => setStep(5)}>
               next
-            </button>
+            </Button>
           </div>
         </div>
       )}
@@ -374,9 +389,9 @@ export default function OnboardingView() {
             speak, and the transcript lands here.
           </div>
           <div className="row">
-            <button className="flow-dark" onClick={testMic} disabled={busy === "test"}>
+            <Button variant="ink" onClick={testMic} loading={busy === "test"}>
               {busy === "test" ? "listening..." : "speak now"}
-            </button>
+            </Button>
           </div>
           {testOut && (
             <div className="flow-card flow-sec">
@@ -387,12 +402,12 @@ export default function OnboardingView() {
             </div>
           )}
           <div className="row">
-            <button className="flow-mini" onClick={() => setStep(4)}>
+            <Button variant="outline" size="sm" onClick={() => setStep(4)}>
               back
-            </button>
-            <button className="flow-dark" onClick={() => setStep(6)}>
+            </Button>
+            <Button variant="ink" onClick={() => setStep(6)}>
               next
-            </button>
+            </Button>
           </div>
         </div>
       )}
@@ -401,18 +416,18 @@ export default function OnboardingView() {
         <div className="flow-card flow-pad flow-sec">
           <h3 className="flow-h3">6. Done</h3>
           <div className="flow-sub">
-            Model {status?.model_found ? "ready" : "still missing (dictation falls back to $SUSURRO_MODEL)"},
-            speed tier {status?.tier || bench?.tier || "unset"},
+            Model {status?.model_found ? "ready" : "arriving (built-in tiny dictates now, base.en follows automatically)"},
+            speed tier {status?.tier || bench?.tier || "measuring in the background"},
             hotkey {HOTKEYS.find((h) => h.name === hotkey)?.label},
             writing {tone} for {intent}.
           </div>
           <div className="row">
-            <button className="flow-mini" onClick={() => setStep(5)}>
+            <Button variant="outline" size="sm" onClick={() => setStep(5)}>
               back
-            </button>
-            <button className="flow-dark" onClick={finish} disabled={busy === "finish"}>
+            </Button>
+            <Button variant="ink" onClick={finish} loading={busy === "finish"}>
               {busy === "finish" ? "saving..." : "start dictating"}
-            </button>
+            </Button>
           </div>
         </div>
       )}
@@ -425,18 +440,34 @@ export default function OnboardingView() {
             them any time; settings and models survive.
           </div>
           <div className="row">
-            <button
-              className="flow-mini"
-              onClick={wipe}
-              disabled={busy === "wipe"}
-              aria-label="erase dictation data"
-            >
-              {busy === "wipe"
-                ? "erasing..."
-                : confirmWipe
-                  ? "click again to confirm erase"
-                  : "erase my data"}
-            </button>
+            <Dialog open={wipeOpen} onOpenChange={setWipeOpen}>
+              <DialogTrigger asChild>
+                <Button variant="outline" size="sm" aria-label="erase dictation data">
+                  erase my data
+                </Button>
+              </DialogTrigger>
+              <DialogContent>
+                <DialogTitle>Erase dictation data?</DialogTitle>
+                <DialogDescription>
+                  Transcripts, words, and styles go. Settings and models survive.
+                </DialogDescription>
+                <div className="row justify-end">
+                  <DialogClose asChild>
+                    <Button variant="outline" size="sm">
+                      keep it
+                    </Button>
+                  </DialogClose>
+                  <Button
+                    variant="destructive"
+                    size="sm"
+                    onClick={wipe}
+                    loading={busy === "wipe"}
+                  >
+                    {busy === "wipe" ? "erasing..." : "erase everything"}
+                  </Button>
+                </div>
+              </DialogContent>
+            </Dialog>
           </div>
         </div>
       )}

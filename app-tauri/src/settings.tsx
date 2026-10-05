@@ -1,6 +1,17 @@
 import { useEffect, useState } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import { check } from "@tauri-apps/plugin-updater";
+import { Button } from "@/components/ui/button";
+import { Input } from "@/components/ui/input";
+import { Label } from "@/components/ui/label";
+import { Switch } from "@/components/ui/switch";
+import {
+  Select,
+  SelectContent,
+  SelectItem,
+  SelectTrigger,
+  SelectValue,
+} from "@/components/ui/select";
 
 export interface Settings {
   seconds: number;
@@ -177,32 +188,34 @@ export default function SettingsView() {
 
       <div className="flow-card flow-pad flow-sec">
         <h3 className="flow-h3">Recording</h3>
-        <label className="flow-label">Recording window (seconds)</label>
-        <input
-          className="flow-input mono"
+        <Label htmlFor="set-seconds">Recording window (seconds)</Label>
+        <Input
+          id="set-seconds"
+          mono
           type="number"
           value={s.seconds}
           onChange={(e) => set("seconds", Number(e.target.value))}
         />
-        <label className="flow-check">
-          <input
-            type="checkbox"
+        <div className="my-2.5 flex items-center gap-2.5">
+          <Switch
+            id="set-vad"
             checked={s.auto_stop}
-            onChange={(e) => set("auto_stop", e.target.checked)}
+            onCheckedChange={(v) => set("auto_stop", v)}
           />
-          <span>Stop on end-of-speech (VAD)</span>
-        </label>
-        <label className="flow-check">
-          <input
-            type="checkbox"
+          <Label htmlFor="set-vad" className="mb-0">Stop on end-of-speech (VAD)</Label>
+        </div>
+        <div className="my-2.5 flex items-center gap-2.5">
+          <Switch
+            id="set-sound"
             checked={s.sound}
-            onChange={(e) => set("sound", e.target.checked)}
+            onCheckedChange={(v) => set("sound", v)}
           />
-          <span>Sound cues (start, stop, done, error)</span>
-        </label>
-        <label className="flow-label">PipeWire target (empty means default source)</label>
-        <input
-          className="flow-input mono"
+          <Label htmlFor="set-sound" className="mb-0">Sound cues (start, stop, done, error)</Label>
+        </div>
+        <Label htmlFor="set-device">PipeWire target (empty means default source)</Label>
+        <Input
+          id="set-device"
+          mono
           value={s.device}
           onChange={(e) => set("device", e.target.value)}
         />
@@ -210,68 +223,71 @@ export default function SettingsView() {
 
       <div className="flow-card flow-pad flow-sec">
         <h3 className="flow-h3">Cleanup and models</h3>
-        <label className="flow-label">Cleanup</label>
-        <select
-          className="flow-input"
-          value={s.cleanup}
-          onChange={(e) => set("cleanup", e.target.value)}
-        >
-          <option value="none">none (raw transcript)</option>
-          <option value="regex">regex fallback</option>
-          <option value="ollama">ollama (local LLM)</option>
-        </select>
-        <label className="flow-label">Ollama model</label>
-        <input
-          className="flow-input mono"
+        <Label>Cleanup</Label>
+        <Select value={s.cleanup} onValueChange={(v) => set("cleanup", v)}>
+          <SelectTrigger aria-label="cleanup">
+            <SelectValue />
+          </SelectTrigger>
+          <SelectContent>
+            <SelectItem value="none">none (raw transcript)</SelectItem>
+            <SelectItem value="regex">regex fallback</SelectItem>
+            <SelectItem value="ollama">ollama (local LLM)</SelectItem>
+          </SelectContent>
+        </Select>
+        <Label htmlFor="set-ollama">Ollama model</Label>
+        <Input
+          id="set-ollama"
+          mono
           value={s.ollama_model}
           onChange={(e) => set("ollama_model", e.target.value)}
         />
-        <label className="flow-label">Whisper model path (empty means $SUSURRO_MODEL)</label>
-        <input
-          className="flow-input mono"
+        <Label htmlFor="set-model">Whisper model path (empty means $SUSURRO_MODEL)</Label>
+        <Input
+          id="set-model"
+          mono
           value={s.whisper_model}
           onChange={(e) => set("whisper_model", e.target.value)}
         />
-        <label className="flow-label">Release channel</label>
-        <select
-          className="flow-input"
-          value={s.update_channel}
-          onChange={(e) => set("update_channel", e.target.value)}
-        >
-          <option value="stable">stable</option>
-          <option value="beta">beta</option>
-        </select>
+        <Label>Release channel</Label>
+        <Select value={s.update_channel} onValueChange={(v) => set("update_channel", v)}>
+          <SelectTrigger aria-label="release channel">
+            <SelectValue />
+          </SelectTrigger>
+          <SelectContent>
+            <SelectItem value="stable">stable</SelectItem>
+            <SelectItem value="beta">beta</SelectItem>
+          </SelectContent>
+        </Select>
       </div>
 
       <div className="flow-card flow-pad flow-sec">
         <h3 className="flow-h3">Tone follows the app</h3>
         <div className="flow-sub">Formal in docs, casual in messages. Also on the Style page.</div>
         <div className="row">
-          <button className="flow-mini" onClick={loadProfiles} aria-label="load format profiles">
+          <Button variant="outline" size="sm" onClick={loadProfiles} aria-label="load format profiles">
             load profiles
-          </button>
+          </Button>
         </div>
         <div className="row">
-          <input
-            className="flow-search"
+          <Input
             value={profileApp}
             onChange={(e) => setProfileApp(e.target.value)}
             placeholder="app pattern, e.g. docs"
             aria-label="app pattern"
           />
-          <select
-            className="flow-search"
-            value={profileStyle}
-            onChange={(e) => setProfileStyle(e.target.value)}
-            aria-label="profile style"
-          >
-            <option value="formal">formal (polish)</option>
-            <option value="casual">casual (tidy only)</option>
-            <option value="verbatim">verbatim (raw)</option>
-          </select>
-          <button className="flow-mini" onClick={saveProfile} aria-label="save format profile">
+          <Select value={profileStyle} onValueChange={setProfileStyle}>
+            <SelectTrigger aria-label="profile style">
+              <SelectValue />
+            </SelectTrigger>
+            <SelectContent>
+              <SelectItem value="formal">formal (polish)</SelectItem>
+              <SelectItem value="casual">casual (tidy only)</SelectItem>
+              <SelectItem value="verbatim">verbatim (raw)</SelectItem>
+            </SelectContent>
+          </Select>
+          <Button variant="outline" size="sm" onClick={saveProfile} aria-label="save format profile">
             save profile
-          </button>
+          </Button>
         </div>
       </div>
       {profileNote && <div className="flow-note" aria-live={live}>{profileNote}</div>}
@@ -283,13 +299,14 @@ export default function SettingsView() {
                 {p.app}: {p.style} (cleanup {p.cleanup})
               </div>
               <div className="flow-actions">
-                <button
-                  className="flow-mini"
+                <Button
+                  variant="outline"
+                  size="xs"
                   onClick={() => removeProfile(p.app)}
                   aria-label={`remove profile ${p.app}`}
                 >
                   remove
-                </button>
+                </Button>
               </div>
             </div>
           ))}
@@ -297,15 +314,15 @@ export default function SettingsView() {
       )}
 
       <div className="row flow-sec">
-        <button className="flow-dark" onClick={save}>
+        <Button variant="ink" onClick={save}>
           {saved ? "saved" : "save"}
-        </button>
-        <button className="flow-mini" onClick={checkUpdates}>
+        </Button>
+        <Button variant="outline" size="sm" onClick={checkUpdates}>
           check for updates
-        </button>
-        <button className="flow-mini" onClick={runDoctor}>
+        </Button>
+        <Button variant="outline" size="sm" onClick={runDoctor}>
           run doctor
-        </button>
+        </Button>
       </div>
       <div className="flow-note" aria-live={live}>{updateNote}</div>
       {doctor && (
@@ -319,44 +336,44 @@ export default function SettingsView() {
       <div className="flow-card flow-pad flow-sec">
         <h3 className="flow-h3">Reading the screen</h3>
         <div className="flow-sub">The hotkey remaps live. Contrast and announcements apply on save.</div>
-        <label className="flow-label">Dictation hotkey</label>
-        <select
-          className="flow-input"
-          value={s.hotkey}
-          onChange={(e) => set("hotkey", e.target.value)}
-          aria-label="dictation hotkey"
-        >
-          <option value="super_shift_r">Super + Shift + R</option>
-          <option value="ctrl_shift_r">Ctrl + Shift + R</option>
-          <option value="shift_d">Shift + D</option>
-        </select>
-        <label className="flow-check">
-          <input
-            type="checkbox"
+        <Label>Dictation hotkey</Label>
+        <Select value={s.hotkey} onValueChange={(v) => set("hotkey", v)}>
+          <SelectTrigger aria-label="dictation hotkey">
+            <SelectValue />
+          </SelectTrigger>
+          <SelectContent>
+            <SelectItem value="super_shift_r">Super + Shift + R</SelectItem>
+            <SelectItem value="ctrl_shift_r">Ctrl + Shift + R</SelectItem>
+            <SelectItem value="shift_d">Shift + D</SelectItem>
+          </SelectContent>
+        </Select>
+        <div className="my-2.5 flex items-center gap-2.5">
+          <Switch
+            id="set-hc"
             checked={s.high_contrast}
-            onChange={(e) => set("high_contrast", e.target.checked)}
+            onCheckedChange={(v) => set("high_contrast", v)}
             aria-label="high contrast"
           />
-          <span>High contrast</span>
-        </label>
-        <label className="flow-check">
-          <input
-            type="checkbox"
+          <Label htmlFor="set-hc" className="mb-0">High contrast</Label>
+        </div>
+        <div className="my-2.5 flex items-center gap-2.5">
+          <Switch
+            id="set-announce"
             checked={s.announce}
-            onChange={(e) => set("announce", e.target.checked)}
+            onCheckedChange={(v) => set("announce", v)}
             aria-label="screen reader announcements"
           />
-          <span>Screen reader announcements</span>
-        </label>
+          <Label htmlFor="set-announce" className="mb-0">Screen reader announcements</Label>
+        </div>
       </div>
 
       <div className="flow-card flow-pad flow-sec">
         <h3 className="flow-h3">History</h3>
         <div className="flow-sub">Raw beside cleaned, with restore.</div>
         <div className="row">
-          <button className="flow-mini" onClick={loadHistory} aria-label="load history">
+          <Button variant="outline" size="sm" onClick={loadHistory} aria-label="load history">
             load history
-          </button>
+          </Button>
         </div>
       </div>
       {historyNote && <div className="flow-note" aria-live={live}>{historyNote}</div>}
@@ -380,21 +397,23 @@ export default function SettingsView() {
                 </div>
                 <div className="flow-actions">
                   {h.cleaned_text && h.cleaned_text !== h.raw_text && (
-                    <button
-                      className="flow-mini"
+                    <Button
+                      variant="outline"
+                      size="xs"
                       onClick={() => toggleRaw(h.session)}
                       aria-label={raw ? "show polished text" : "show raw transcript"}
                     >
                       {raw ? "show polished" : "show raw"}
-                    </button>
+                    </Button>
                   )}
-                  <button
-                    className="flow-mini"
+                  <Button
+                    variant="outline"
+                    size="xs"
                     onClick={() => restoreRaw(h.session)}
                     aria-label={`restore raw transcript ${h.session.slice(0, 8)}`}
                   >
                     restore raw
-                  </button>
+                  </Button>
                 </div>
               </div>
             );
@@ -406,9 +425,9 @@ export default function SettingsView() {
         <h3 className="flow-h3">Usage</h3>
         <div className="flow-sub">Words, streak, latency. Also on the Insights page.</div>
         <div className="row">
-          <button className="flow-mini" onClick={loadStats} aria-label="load usage stats">
+          <Button variant="outline" size="sm" onClick={loadStats} aria-label="load usage stats">
             load stats
-          </button>
+          </Button>
         </div>
       </div>
       {statsNote && <div className="flow-note" aria-live={live}>{statsNote}</div>}

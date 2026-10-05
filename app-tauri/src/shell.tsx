@@ -7,7 +7,14 @@ import DictionaryPage from "./pages/dictionary";
 import SnippetsPage from "./pages/snippets";
 import StylePage from "./pages/style";
 import { TransformsPage, ScratchpadPage } from "./pages/placeholders";
+import SystemPage from "./pages/system";
 import HelpPage from "./pages/help";
+import {
+  Tooltip,
+  TooltipContent,
+  TooltipProvider,
+  TooltipTrigger,
+} from "@/components/ui/tooltip";
 
 export type Page =
   | "home"
@@ -17,6 +24,7 @@ export type Page =
   | "style"
   | "transforms"
   | "scratchpad"
+  | "system"
   | "settings"
   | "help";
 
@@ -28,6 +36,7 @@ const NAV: { id: Page; label: string; glyph: string }[] = [
   { id: "style", label: "Style", glyph: "Tt" },
   { id: "transforms", label: "Transforms", glyph: "⇄" },
   { id: "scratchpad", label: "Scratchpad", glyph: "✎" },
+  { id: "system", label: "System", glyph: "◉" },
 ];
 
 const FOOT: { id: Page; label: string; glyph: string }[] = [
@@ -44,6 +53,7 @@ export default function Shell() {
       .catch(() => {});
   }, []);
   return (
+    <TooltipProvider delayDuration={300}>
     <div className={`flow${hc ? " high-contrast" : ""}`}>
       <aside className="flow-side">
         <div className="flow-brand" aria-label="susurro,">
@@ -52,32 +62,42 @@ export default function Shell() {
         </div>
         <nav aria-label="primary">
           {NAV.map((n) => (
-            <button
-              key={n.id}
-              className={`flow-nav${page === n.id ? " active" : ""}`}
-              onClick={() => setPage(n.id)}
-              aria-current={page === n.id ? "page" : undefined}
-            >
-              <span className="glyph" aria-hidden="true">
-                {n.glyph}
-              </span>
-              <span className="label">{n.label}</span>
-            </button>
+            <Tooltip key={n.id}>
+              <TooltipTrigger asChild>
+                <button
+                  className={`flow-nav${page === n.id ? " active" : ""}`}
+                  onClick={() => setPage(n.id)}
+                  aria-current={page === n.id ? "page" : undefined}
+                  aria-label={n.label}
+                >
+                  <span className="glyph" aria-hidden="true">
+                    {n.glyph}
+                  </span>
+                  <span className="label">{n.label}</span>
+                </button>
+              </TooltipTrigger>
+              <TooltipContent side="right">{n.label}</TooltipContent>
+            </Tooltip>
           ))}
         </nav>
         <div className="flow-foot">
           {FOOT.map((n) => (
-            <button
-              key={n.id}
-              className={`flow-nav${page === n.id ? " active" : ""}`}
-              onClick={() => setPage(n.id)}
-              aria-current={page === n.id ? "page" : undefined}
-            >
-              <span className="glyph" aria-hidden="true">
-                {n.glyph}
-              </span>
-              <span className="label">{n.label}</span>
-            </button>
+            <Tooltip key={n.id}>
+              <TooltipTrigger asChild>
+                <button
+                  className={`flow-nav${page === n.id ? " active" : ""}`}
+                  onClick={() => setPage(n.id)}
+                  aria-current={page === n.id ? "page" : undefined}
+                  aria-label={n.label}
+                >
+                  <span className="glyph" aria-hidden="true">
+                    {n.glyph}
+                  </span>
+                  <span className="label">{n.label}</span>
+                </button>
+              </TooltipTrigger>
+              <TooltipContent side="right">{n.label}</TooltipContent>
+            </Tooltip>
           ))}
         </div>
       </aside>
@@ -89,6 +109,7 @@ export default function Shell() {
         {page === "style" && <StylePage />}
         {page === "transforms" && <TransformsPage />}
         {page === "scratchpad" && <ScratchpadPage />}
+        {page === "system" && <SystemPage />}
         {page === "settings" && (
           <div className="flow-page">
             <h1 className="flow-title">Settings</h1>
@@ -98,5 +119,6 @@ export default function Shell() {
         {page === "help" && <HelpPage />}
       </main>
     </div>
+    </TooltipProvider>
   );
 }

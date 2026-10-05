@@ -1,5 +1,7 @@
 import { useEffect, useState } from "react";
 import { invoke } from "@tauri-apps/api/core";
+import { Button } from "@/components/ui/button";
+import { Input } from "@/components/ui/input";
 
 export default function DictionaryPage() {
   const [words, setWords] = useState<string[]>([]);
@@ -49,12 +51,11 @@ export default function DictionaryPage() {
       <div className="flow-head">
         <h1 className="flow-title">Dictionary</h1>
         <div className="row">
-          <input
+          <Input
             value={filter}
             onChange={(e) => setFilter(e.target.value)}
             placeholder="Search words"
             aria-label="search dictionary"
-            className="flow-search"
           />
         </div>
       </div>
@@ -63,16 +64,15 @@ export default function DictionaryPage() {
           <h2>Susurro spells the way you do</h2>
           <p>Add personal terms, company jargon, and client names.</p>
           <div className="row">
-            <input
+            <Input
               value={draft}
               onChange={(e) => setDraft(e.target.value)}
               placeholder="Add new word"
               aria-label="new dictionary word"
-              className="flow-search"
             />
-            <button className="flow-light" onClick={add}>
+            <Button variant="paper" onClick={add}>
               Add word
-            </button>
+            </Button>
           </div>
         </div>
       </div>
@@ -82,13 +82,14 @@ export default function DictionaryPage() {
           <div key={w} className="flow-row">
             <span className="flow-text">{w}</span>
             <span className="flow-actions">
-              <button
-                className="flow-mini"
+              <Button
+                variant="outline"
+                size="xs"
                 onClick={() => remove(w)}
                 aria-label={`remove ${w}`}
               >
                 Remove
-              </button>
+              </Button>
             </span>
           </div>
         ))}

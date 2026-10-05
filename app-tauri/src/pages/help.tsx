@@ -1,5 +1,6 @@
 import { useState } from "react";
 import { invoke } from "@tauri-apps/api/core";
+import { Button } from "@/components/ui/button";
 
 export default function HelpPage() {
   const [doctor, setDoctor] = useState("");
@@ -34,16 +35,17 @@ export default function HelpPage() {
         </div>
         <h3 className="flow-h3">First aid</h3>
         <div className="flow-sub">
-          No text appears: check that whisper-cli is installed, a model is
-          downloaded, and on Linux that ydotoold runs. Then run doctor.
+          No text appears: check that a model is downloaded
+          (onboarding fetches it), and on Linux that ydotoold runs.
+          Then run doctor. Live component status lives on the System page.
         </div>
         <div className="row">
-          <button className="flow-dark" onClick={run} disabled={busy}>
+          <Button variant="ink" onClick={run} loading={busy}>
             {busy ? "checking..." : "Run doctor"}
-          </button>
-          <button className="flow-mini" onClick={replay} aria-label="replay setup">
+          </Button>
+          <Button variant="outline" size="sm" onClick={replay} aria-label="replay setup">
             Replay setup
-          </button>
+          </Button>
         </div>
       </div>
       {doctor && (
