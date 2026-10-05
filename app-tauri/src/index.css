@@ -1,0 +1,54 @@
+/* Susurro token layer for Tailwind v4.
+   Utilities + theme only: no preflight import, so the hand-built
+   pill/shell craft in styles.css renders pixel-identical. New
+   components use these tokens; old CSS keeps working untouched.
+   `@theme inline` keeps utilities referencing the vars, so the
+   high-contrast overrides below propagate at runtime. */
+@import "tailwindcss/theme.css" layer(theme);
+@import "tailwindcss/utilities.css" layer(utilities);
+
+:root {
+  --su-pine: #0f6e56;
+  --su-pine-deep: #0a4f3e;
+  --su-ember: #d85a30;
+  --su-ember-deep: #b04420;
+  --su-cream: #f6f4ed;
+  --su-parchment: #f1efe8;
+  --su-sand: #edeae0;
+  --su-card: #fffdf8;
+  --su-ink: #1b1a17;
+  --su-coal: #1c1c1a;
+  --su-soot: #2a2a27;
+}
+
+.high-contrast {
+  --su-pine: #007a52;
+  --su-pine-deep: #00563f;
+  --su-ember: #c22e00;
+  --su-ember-deep: #a32400;
+  --su-cream: #fff;
+  --su-parchment: #fff;
+  --su-sand: #eee;
+  --su-card: #fff;
+  --su-ink: #000;
+  --su-coal: #000;
+  --su-soot: #000;
+}
+
+@theme inline {
+  --color-pine: var(--su-pine);
+  --color-pine-deep: var(--su-pine-deep);
+  --color-ember: var(--su-ember);
+  --color-ember-deep: var(--su-ember-deep);
+  --color-cream: var(--su-cream);
+  --color-parchment: var(--su-parchment);
+  --color-sand: var(--su-sand);
+  --color-card: var(--su-card);
+  --color-ink: var(--su-ink);
+  --color-coal: var(--su-coal);
+  --color-soot: var(--su-soot);
+
+  --font-sans: Inter, system-ui, sans-serif;
+  --font-serif: Georgia, "Times New Roman", serif;
+  --font-mono: ui-monospace, "JetBrains Mono", Menlo, Consolas, monospace;
+}
