@@ -58,7 +58,12 @@
     "active": true,
     "targets": ["appimage", "deb"],
     "createUpdaterArtifacts": true,
-    "resources": ["resources/models/tiny.en.bin"],
+    "resources": [
+      "resources/models/tiny.en.bin",
+      "resources/models/punct-cnn-bilstm.int8.onnx",
+      "resources/models/punct-bpe.vocab",
+      "resources/dylib/*"
+    ],
     "icon": [
       "icons/32x32.png",
       "icons/128x128.png",

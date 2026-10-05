@@ -48,6 +48,9 @@ interface SystemStatus {
   ollama_up: boolean;
   ollama_model_present: boolean;
   ollama_hint: string;
+  cleanup_tier: string;
+  punct_ready: boolean;
+  punct_hint: string;
   engine: { kind: string; version: string };
   models: AssetHealth[];
   resolved_path: string;
@@ -134,13 +137,21 @@ export default function SystemPage() {
             <span className="flow-sub">{status.paste_detail}</span>
           </div>
           <div className="row">
-            <Badge variant={status.ollama_up && status.ollama_model_present ? "local" : "idle"}>
-              {status.ollama_up && status.ollama_model_present ? "cleanup model ready" : "cleanup fallback"}
+            <Badge variant={status.cleanup_tier === "onnx" ? (status.punct_ready ? "local" : "degraded") : "idle"}>
+              {status.cleanup_tier === "onnx"
+                ? status.punct_ready
+                  ? "bundled punctuation"
+                  : "punctuation pending"
+                : `cleanup ${status.cleanup_tier}`}
             </Badge>
-            {!status.ollama_up || !status.ollama_model_present ? (
-              <span className="flow-sub">{status.ollama_hint}</span>
-            ) : null}
+            {status.punct_hint && <span className="flow-sub">{status.punct_hint}</span>}
           </div>
+          {status.ollama_hint && (
+            <div className="row">
+              <Badge variant="outline">ollama</Badge>
+              <span className="flow-sub">{status.ollama_hint}</span>
+            </div>
+          )}
           {status.whisper_hint && <div className="flow-sub">{status.whisper_hint}</div>}
         </div>
       </div>

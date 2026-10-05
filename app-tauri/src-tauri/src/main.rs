@@ -48,7 +48,7 @@ impl Default for Settings {
             seconds: 30,
             auto_stop: true,
             sound: true,
-            cleanup: "ollama".into(),
+            cleanup: "onnx".into(),
             ollama_model: "qwen3:0.6b".into(),
             whisper_model: String::new(),
             device: String::new(),
@@ -109,6 +109,9 @@ struct AppState {
     /// Bundled day-0 tiny, resolved from the resource dir at startup.
     /// None in dev without resources or with SKIP_MODEL_FETCH builds.
     bundled_tiny: Mutex<Option<PathBuf>>,
+    /// Bundled day-0 cleanup model dir (ADR-004 Phase 4). Same
+    /// lifecycle as the tiny: resolved once, read by every dictation.
+    bundled_punct: Mutex<Option<PathBuf>>,
     /// Model prefetch single-flight: one background base fetch at a
     /// time; the download button joins it instead of doubling it.
     prefetch: Mutex<Option<std::thread::JoinHandle<Result<String, String>>>>,
@@ -167,6 +170,50 @@ impl AppState {
 /// Bundled day-0 tiny for this process, if the bundle ships one.
 fn bundled_of(state: &Arc<AppState>) -> Option<PathBuf> {
     state.bundled_tiny.lock().ok().and_then(|b| b.clone())
+}
+
+/// Bundled cleanup model dir, resolved once at startup like the tiny.
+fn bundled_punct_of(state: &Arc<AppState>) -> Option<PathBuf> {
+    state.bundled_punct.lock().ok().and_then(|b| b.clone())
+}
+
+/// Put the bundle's runtime directory on the DLL search path
+/// (ADR-004 Phase 4). Tauri resources land in a `resources`
+/// subdirectory, which the Windows loader does not search, so the
+/// sherpa-onnx DLLs shipped beside the app would never be found and
+/// punctuation would silently degrade to the regex tidier. Runs once
+/// at startup, well before the first model load.
+fn extend_dll_search_path(app: &AppHandle) -> Option<std::path::PathBuf> {
+    let dir = app.path().resource_dir().ok()?.join("dylib");
+    if !dir.is_dir() {
+        return None;
+    }
+    susurro_adapters_windows::extend_dll_search_path(&dir).then_some(dir)
+}
+
+/// Cleanup model pair for the `onnx` tier (ADR-004 Phase 4). The
+/// store copy wins so an updated model takes over, and the bundled
+/// copy is the day-0 fallback so a fresh install punctuates offline.
+/// A half-present pair is worth nothing, so `None` when only one side
+/// is there: the tier then fails open to regex rather than loading a
+/// model with no vocabulary.
+fn punct_paths(
+    bundled: Option<&std::path::Path>,
+) -> Option<susurro_adapters_cleanup::PunctPaths> {
+    use susurro_provision::{PUNCT_MODEL_NAME, PUNCT_VOCAB_NAME};
+    let store = models_home();
+    let pair = |dir: &std::path::Path| {
+        let model = dir.join(PUNCT_MODEL_NAME);
+        let vocab = dir.join(PUNCT_VOCAB_NAME);
+        (model.is_file() && vocab.is_file()).then_some(susurro_adapters_cleanup::PunctPaths {
+            model,
+            vocab,
+        })
+    };
+    store
+        .as_deref()
+        .and_then(pair)
+        .or_else(|| bundled.and_then(pair))
 }
 
 fn shellexpand(p: &str) -> String {
@@ -517,9 +564,13 @@ fn requirements_data(
     };
     // The engine ships linked: no binary to install, no hint needed.
     let whisper_hint = String::new();
-    // Cleanup chain (Windows audit): the Ollama API is identical on
-    // every OS, so one probe covers all. The model must be pulled,
-    // not just the server up.
+    // Cleanup chain (ADR-004 Phase 4): the bundled ONNX punctuation
+    // model is the default and needs no server, so this reports that
+    // tier first. The Ollama API is identical on every OS, so one
+    // probe covers all, and the model must be pulled, not just the
+    // server up.
+    let punct_ready = punct_paths(bundled_punct_of(state).as_deref()).is_some();
+    let cleanup_tier = settings.cleanup.clone();
     let ollama_models = susurro_core::silent_command("curl")
         .args(["-sS", "-m", "5", "http://localhost:11434/api/tags"])
         .output()
@@ -530,7 +581,8 @@ fn requirements_data(
     let ollama_up = !ollama_models.is_empty();
     let ollama_model_present =
         ollama_models.contains(&settings.ollama_model);
-    let ollama_hint = if ollama_up && ollama_model_present {
+    // Only nag about Ollama when the user actually chose that tier.
+    let ollama_hint = if cleanup_tier != "ollama" || (ollama_up && ollama_model_present) {
         String::new()
     } else if os == "windows" {
         format!(
@@ -554,6 +606,14 @@ fn requirements_data(
         "ollama_up": ollama_up,
         "ollama_model_present": ollama_model_present,
         "ollama_hint": ollama_hint,
+        "cleanup_tier": cleanup_tier,
+        "punct_ready": punct_ready,
+        "punct_hint": if punct_ready {
+            String::new()
+        } else {
+            "punctuation model not on disk yet: run susurro converge, or let the next launch fetch it."
+                .to_string()
+        },
     }))
 }
 
@@ -860,7 +920,13 @@ fn test_dictation(
     let mut settings = state.settings.lock().map_err(|e| e.to_string())?.clone();
     settings.seconds = 6;
     let tickets = TicketRegistry::new();
-    let out = run_dictation(&app, &settings, &tickets, bundled_of(&state).as_deref());
+    let out = run_dictation(
+        &app,
+        &settings,
+        &tickets,
+        bundled_of(&state).as_deref(),
+        bundled_punct_of(&state).as_deref(),
+    );
     state.release();
     out
 }
@@ -1313,6 +1379,7 @@ fn run_dictation(
     settings: &Settings,
     tickets: &TicketRegistry,
     bundled_tiny: Option<&std::path::Path>,
+    bundled_punct: Option<&std::path::Path>,
 ) -> Result<UtteranceResult, String> {
     let t0 = std::time::Instant::now();
     emit_state(app, "listening");
@@ -1346,20 +1413,23 @@ fn run_dictation(
     let stt = susurro_adapters_stt_local::native::WhisperNative::base_en(
         resolve_whisper(&settings.whisper_model, bundled_tiny).into(),
     );
-    let passthrough = susurro_adapters_cleanup::PassthroughCleanup;
-    let regex = susurro_adapters_cleanup::RegexCleanup;
-    let ollama = susurro_adapters_cleanup::OllamaCleanup::new(&settings.ollama_model);
+    // Cleanup chain (ADR-004 Phase 4). `onnx` is the default and needs no
+    // server; `ollama` is the opt-in rewrite tier for the formal
+    // profile; `regex` tidies; `none` injects raw. Every tier fails
+    // open to regex, so a missing model never blocks injection.
     let cleanup_name: &str = match profile_style.as_deref() {
         Some("formal") => "ollama",
         Some("casual") => "regex",
         Some("verbatim") => "none",
         _ => settings.cleanup.as_str(),
     };
-    let cleanup: &dyn TextPostProcessorPort = match cleanup_name {
-        "ollama" => &ollama,
-        "regex" => &regex,
-        _ => &passthrough,
-    };
+    let cleanup = susurro_adapters_cleanup::by_name(
+        cleanup_name,
+        punct_paths(bundled_punct),
+        &settings.ollama_model,
+    )
+    .map_err(|e| e.to_string())?;
+    let cleanup: &dyn TextPostProcessorPort = cleanup.as_ref();
     // Staged progress ticker: the current stage plus its start time are
     // shared with a thread that emits susurro://progress every 100ms.
     // The math lives in core (progress_for): asymptotic per stage, so
@@ -1606,7 +1676,13 @@ fn start_dictation(
     let settings = state.settings.lock().map_err(|e| e.to_string())?.clone();
     let tickets = TicketRegistry::new();
     show_pill(&app, settings.sound);
-    let out = run_dictation(&app, &settings, &tickets, bundled_of(&state).as_deref());
+    let out = run_dictation(
+        &app,
+        &settings,
+        &tickets,
+        bundled_of(&state).as_deref(),
+        bundled_punct_of(&state).as_deref(),
+    );
     state.release();
     out
 }
@@ -1655,7 +1731,13 @@ fn spawn_hotkey_listener(app: AppHandle, state: Arc<AppState>) {
             }
             show_pill(&app, state.settings.lock().map(|s| s.sound).unwrap_or(true));
             let settings = state.settings.lock().map(|s| s.clone()).unwrap_or_default();
-            let _ = run_dictation(&app, &settings, &tickets, bundled_of(&state).as_deref());
+            let _ = run_dictation(
+        &app,
+        &settings,
+        &tickets,
+        bundled_of(&state).as_deref(),
+        bundled_punct_of(&state).as_deref(),
+    );
             state.release();
         }
     });
@@ -1686,7 +1768,13 @@ fn build_tray(app: &AppHandle) -> Result<(), Box<dyn std::error::Error>> {
                     }
                     let settings = state.settings.lock().map(|s| s.clone()).unwrap_or_default();
                     let tickets = TicketRegistry::new();
-                    let _ = run_dictation(&handle, &settings, &tickets, bundled_of(&state).as_deref());
+                    let _ = run_dictation(
+            &handle,
+            &settings,
+            &tickets,
+            bundled_of(&state).as_deref(),
+            bundled_punct_of(&state).as_deref(),
+        );
                     state.release();
                 });
             }
@@ -1728,6 +1816,7 @@ fn main() {
         dir: ctx_dir,
         inflight: std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
         bundled_tiny: Mutex::new(None),
+        bundled_punct: Mutex::new(None),
         prefetch: Mutex::new(None),
         convergence_stop: std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
     });
@@ -1774,14 +1863,28 @@ fn main() {
             spawn_hotkey_listener(app.handle().clone(), hotkey_state.clone());
             // Day-0 model: resolve the bundled tiny once, so every
             // later resolution finds it without an AppHandle.
-            if let Ok(resource_dir) = app.path().resource_dir() {
-                let bundled = resource_dir.join("models/tiny.en.bin");
-                if bundled.exists() {
-                    *resource_state.bundled_tiny.lock().unwrap_or_else(|e| e.into_inner()) =
-                        Some(bundled);
+if let Ok(resource_dir) = app.path().resource_dir() {
+                    let bundled = resource_dir.join("models/tiny.en.bin");
+                    if bundled.exists() {
+                        *resource_state.bundled_tiny.lock().unwrap_or_else(|e| e.into_inner()) =
+                            Some(bundled);
+                    }
+                    // Cleanup model pair, same deal (ADR-004 Phase 4).
+                    let punct = resource_dir.join("models");
+                    if punct.join(susurro_provision::PUNCT_MODEL_NAME).exists()
+                        && punct.join(susurro_provision::PUNCT_VOCAB_NAME).exists()
+                    {
+                        *resource_state.bundled_punct.lock().unwrap_or_else(|e| e.into_inner()) =
+                            Some(punct);
+                    }
                 }
-            }
             build_tray(app.handle())?;
+            // Runtime DLL search path first (ADR-004 Phase 4): the
+            // punctuation model cannot load without it, and dictation
+            // must not be the thing that discovers the problem.
+            if let Some(dir) = extend_dll_search_path(app.handle()) {
+                eprintln!("runtime dll path: {}", dir.display());
+            }
             // Convergence loop on boot (ADR-004 point 5). It runs
             // beside onboarding: the bundled tiny already makes
             // dictation work offline, so the loop only fills in what

@@ -33,7 +33,7 @@ const DEFAULTS: Settings = {
   seconds: 30,
   auto_stop: true,
   sound: true,
-  cleanup: "ollama",
+  cleanup: "onnx",
   ollama_model: "qwen3:0.6b",
   whisper_model: "",
   device: "",
@@ -229,9 +229,10 @@ export default function SettingsView() {
             <SelectValue />
           </SelectTrigger>
           <SelectContent>
-            <SelectItem value="none">none (raw transcript)</SelectItem>
+            <SelectItem value="onnx">onnx punctuation (bundled, offline)</SelectItem>
+            <SelectItem value="ollama">ollama (opt-in local LLM)</SelectItem>
             <SelectItem value="regex">regex fallback</SelectItem>
-            <SelectItem value="ollama">ollama (local LLM)</SelectItem>
+            <SelectItem value="none">none (raw transcript)</SelectItem>
           </SelectContent>
         </Select>
         <Label htmlFor="set-ollama">Ollama model</Label>
