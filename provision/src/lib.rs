@@ -21,6 +21,7 @@ pub use health::{health, AssetCopy, AssetHealth, CopyKind};
 pub use manifest::{
     default_manifest, fetch_manifest, is_newer, select_asset, sign_manifest, verify_manifest,
     verify_manifest_with, Asset, Manifest, SignedManifest, ASSET_KEY_ID, ASSET_PUBLIC_KEY_HEX,
+    PUNCT_MODEL_NAME, PUNCT_VOCAB_NAME,
 };
 pub use store::{ensure_asset, verify_file};
 

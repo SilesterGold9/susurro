@@ -478,3 +478,44 @@ mod tests {
         }
     }
 }
+/// Add `dir` to the Windows DLL search path so runtime libraries
+/// shipped beside the app are found (ADR-004 Phase 4).
+///
+/// Tauri resources land in a `resources` subdirectory, which the
+/// Windows loader does not search: without this, the sherpa-onnx DLLs
+/// in the bundle are invisible and punctuation silently degrades to
+/// the regex tidier. Returns whether the directory was added.
+///
+/// No-op with `false` off Windows, so callers stay portable.
+#[cfg(target_os = "windows")]
+pub fn extend_dll_search_path(dir: &std::path::Path) -> bool {
+    use std::os::windows::ffi::OsStrExt;
+    use windows_sys::Win32::System::LibraryLoader::SetDllDirectoryW;
+    let wide = dir
+        .as_os_str()
+        .encode_wide()
+        .chain(std::iter::once(0))
+        .collect::<Vec<_>>();
+    // SAFETY: the pointer is NUL-terminated and valid for the call.
+    unsafe { SetDllDirectoryW(wide.as_ptr()) != 0 }
+}
+
+#[cfg(not(target_os = "windows"))]
+pub fn extend_dll_search_path(_dir: &std::path::Path) -> bool {
+    false
+}
+
+#[cfg(test)]
+mod dll_search_path {
+    use super::*;
+
+    #[test]
+    fn a_real_directory_is_added_on_windows() {
+        let dir = std::env::temp_dir();
+        if cfg!(target_os = "windows") {
+            assert!(extend_dll_search_path(&dir), "temp dir must be addable");
+        } else {
+            assert!(!extend_dll_search_path(&dir), "no-op off Windows");
+        }
+    }
+}

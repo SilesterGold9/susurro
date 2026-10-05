@@ -7,3 +7,4 @@ license.workspace = true
 [dependencies]
 susurro-core.workspace = true
 serde_json.workspace = true
+sherpa-onnx = { version = "1.13.8", default-features = false, features = ["shared"] }

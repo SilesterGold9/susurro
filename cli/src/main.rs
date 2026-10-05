@@ -35,6 +35,11 @@ enum Cmd {
         /// Skip mic + whisper, use a fixed mock transcript.
         #[arg(long, default_value_t = false)]
         mock: bool,
+        /// Transcript the mock STT returns with --mock. Lets the
+        /// cleanup chain be exercised on a realistic utterance
+        /// without a microphone.
+        #[arg(long, default_value = "hello from susurro")]
+        mock_text: String,
         /// Print instead of pasting (useful without ydotool).
         #[arg(long, default_value_t = false)]
         stdout: bool,
@@ -51,8 +56,9 @@ enum Cmd {
         /// stops stay silent so the two endings feel different.
         #[arg(long, default_value_t = true, action = clap::ArgAction::Set, num_args = 0..=1, default_missing_value = "true")]
         sound: bool,
-        /// Transcript cleanup: none, regex, or ollama.
-        #[arg(long, default_value = "none")]
+        /// Transcript cleanup: onnx (default, bundled punctuation),
+        /// ollama (opt-in local LLM rewrite), regex (tidier), or none.
+        #[arg(long, default_value = "onnx")]
         cleanup: String,
         /// Ollama model for --cleanup ollama.
         #[arg(long, default_value = "qwen3:0.6b")]
@@ -110,7 +116,7 @@ enum Cmd {
         auto_stop: bool,
         #[arg(long, default_value_t = true, action = clap::ArgAction::Set, num_args = 0..=1, default_missing_value = "true")]
         sound: bool,
-        #[arg(long, default_value = "none")]
+        #[arg(long, default_value = "onnx")]
         cleanup: String,
         #[arg(long, default_value = "qwen3:0.6b")]
         ollama_model: String,
@@ -282,6 +288,7 @@ fn main() -> anyhow::Result<()> {
             seconds,
             model,
             mock,
+            mock_text,
             stdout,
             device,
             auto_stop,
@@ -308,7 +315,7 @@ fn main() -> anyhow::Result<()> {
             backend,
             engine,
             turbo,
-            mock_text: "hello from susurro".into(),
+            mock_text,
         }),
         Cmd::Daemon {
             socket,
@@ -919,6 +926,26 @@ fn doctor() -> anyhow::Result<()> {
         println!("auto backend: {}", auto_backend.describe());
     }
     println!("cloud keys:");
+    // Cleanup tiers (ADR-004 Phase 4): the bundled ONNX punctuation
+    // model is the default and needs no server, so it is probed
+    // first. Ollama is the opt-in rewrite tier and only worth probing
+    // for users who run it.
+    {
+        use susurro_provision::{PUNCT_MODEL_NAME, PUNCT_VOCAB_NAME};
+        match models_dir() {
+            Ok(dir) => {
+                let model = dir.join(PUNCT_MODEL_NAME);
+                let vocab = dir.join(PUNCT_VOCAB_NAME);
+                let state = match (model.is_file(), vocab.is_file()) {
+                    (true, true) => "ready".to_string(),
+                    (false, false) => "missing — susurro converge".to_string(),
+                    _ => "incomplete — half a model pair, run susurro converge --force".to_string(),
+                };
+                println!("punctuation model (onnx): {state}");
+            }
+            Err(e) => println!("punctuation model (onnx): unknown ({e})"),
+        }
+    }
     // Best-effort Ollama server + model probe for --cleanup ollama.
     match susurro_core::silent_command("curl")
         .args(["-sS", "-m", "5", "http://localhost:11434/api/tags"])
@@ -943,7 +970,9 @@ fn doctor() -> anyhow::Result<()> {
             );
         }
         _ => {
-            println!("ollama server: down — --cleanup ollama falls back to regex");
+            // Ollama is opt-in now, so its absence is normal rather
+            // than a gap: the default tier needs no server.
+            println!("ollama server: down — only matters for --cleanup ollama");
             println!("ollama models: unknown — start the server to list pulled models");
         }
     }
@@ -1633,10 +1662,12 @@ fn run_utterance(opts: &ListenOpts, tickets: &TicketRegistry) -> anyhow::Result<
     };
     let inject: &dyn susurro_core::ports::TextInjectionPort = inject_box.as_ref();
 
-    // Cleanup: none (passthrough), regex fallback, or local Ollama LLM
-    // (fails open to regex when Ollama is down or the model is missing).
-    // Format profile (#40): tone follows the app, so a matching profile
-    // overrides --cleanup for this run and says so on stderr.
+    // Cleanup chain (ADR-004 Phase 4): onnx is the default and needs no
+    // server, ollama is the opt-in rewrite tier, regex is the tidier,
+    // none is raw. Every tier fails open to regex, so a missing model
+    // never blocks injection. Format profile (#40): tone follows the
+    // app, so a matching profile overrides --cleanup for this run and
+    // says so on stderr.
     let profile = profile_for_app(focused.as_deref());
     if let Some(ref p) = profile {
         eprintln!(
@@ -1650,15 +1681,10 @@ fn run_utterance(opts: &ListenOpts, tickets: &TicketRegistry) -> anyhow::Result<
         Some(ref p) => p.style.cleanup(),
         None => opts.cleanup.as_str(),
     };
-    let passthrough = susurro_adapters_cleanup::PassthroughCleanup;
-    let regex = susurro_adapters_cleanup::RegexCleanup;
-    let ollama = susurro_adapters_cleanup::OllamaCleanup::new(&opts.ollama_model);
-    let cleanup: &dyn susurro_core::ports::TextPostProcessorPort = match cleanup_name {
-        "regex" => &regex,
-        "ollama" => &ollama,
-        "none" => &passthrough,
-        other => anyhow::bail!("Unknown --cleanup '{other}'. Use none, regex, or ollama."),
-    };
+    let cleanup =
+        susurro_adapters_cleanup::by_name(cleanup_name, punct_paths(), &opts.ollama_model)
+            .map_err(|e| anyhow::anyhow!("{e}"))?;
+    let cleanup: &dyn susurro_core::ports::TextPostProcessorPort = cleanup.as_ref();
 
     // Snippets (issue 55): whole-utterance trigger after cleanup,
     // before injection. Best-effort load so a broken db degrades to
@@ -1995,6 +2021,18 @@ fn models_dir() -> anyhow::Result<std::path::PathBuf> {
         .or_else(|_| std::env::var("USERPROFILE"))
         .map_err(|_| anyhow::anyhow!("no home dir on this machine"))?;
     Ok(std::path::PathBuf::from(home).join(".local/share/susurro/models"))
+}
+
+/// Cleanup model pair for the `onnx` tier, or None when this machine
+/// has no models dir (the tier then fails open to regex). The names
+/// come from the manifest, so the plane stays the single source.
+fn punct_paths() -> Option<susurro_adapters_cleanup::PunctPaths> {
+    use susurro_provision::{PUNCT_MODEL_NAME, PUNCT_VOCAB_NAME};
+    let dir = models_dir().ok()?;
+    Some(susurro_adapters_cleanup::PunctPaths {
+        model: dir.join(PUNCT_MODEL_NAME),
+        vocab: dir.join(PUNCT_VOCAB_NAME),
+    })
 }
 
 /// Converge the plane (ADR-004 point 5). The loop itself lives in

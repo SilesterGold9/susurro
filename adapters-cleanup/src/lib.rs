@@ -2,9 +2,17 @@
 //!
 //! - `PassthroughCleanup`: v0.0.1 raw path.
 //! - `RegexCleanup`: dependency-free fallback (whitespace, spacing).
-//! - `OllamaCleanup`: local LLM via the Ollama HTTP API, with
-//!   automatic fallback to `RegexCleanup` when Ollama is down or
-//!   the model is missing (fail-open: always inject something).
+//! - `PunctuateCleanup`: the default (ADR-004 Phase 4). Bundled ONNX
+//!   punctuation, on device, no server to install.
+//! - `OllamaCleanup`: opt-in rewrite tier for users who already run
+//!   Ollama and want a real model behind the polish step.
+//!
+//! Every tier fails open to the regex tidier, so dictation never waits
+//! on cleanup.
+
+mod punctuate;
+
+pub use punctuate::PunctuateCleanup;
 
 use susurro_core::ports::TextPostProcessorPort;
 use susurro_core::preserves_words;
@@ -23,6 +31,12 @@ impl TextPostProcessorPort for RegexCleanup {
     fn cleanup(&self, raw: &str) -> Result<String, susurro_core::CoreError> {
         Ok(cleanup_whitespace(raw))
     }
+}
+
+/// Whitespace and spacing tidier. Public because it is the last link
+/// in every fail-open chain, not only the `RegexCleanup` tier.
+pub fn regex_cleanup_text(raw: &str) -> String {
+    cleanup_whitespace(raw)
 }
 
 fn cleanup_whitespace(raw: &str) -> String {
@@ -120,6 +134,45 @@ fn strip_leading_label(s: &str) -> &str {
 /// Re-exported from core so every caller shares one definition.
 pub use susurro_core::word_f1;
 
+/// Model files for the `onnx` tier, resolved by the caller because the
+/// provisioning plane owns asset names.
+#[derive(Debug, Clone)]
+pub struct PunctPaths {
+    pub model: std::path::PathBuf,
+    pub vocab: std::path::PathBuf,
+}
+
+/// Build the cleaner for a tier name. One place decides the chain, so
+/// the CLI, the app, and the tests cannot disagree about what `onnx`
+/// means or which names exist.
+///
+/// Tiers: `onnx` (default, bundled punctuation), `ollama` (opt-in
+/// rewrite tier), `regex` (tidier only), `none` (raw transcript).
+pub fn by_name(
+    tier: &str,
+    punct: Option<PunctPaths>,
+    ollama_model: &str,
+) -> Result<Box<dyn TextPostProcessorPort>, String> {
+    Ok(match tier {
+        "onnx" => {
+            let paths = punct.ok_or_else(|| {
+                "no models dir on this machine, so the bundled punctuation model cannot load. \
+                 Use --cleanup regex or none."
+                    .to_string()
+            })?;
+            Box::new(PunctuateCleanup::new(paths.model, paths.vocab))
+        }
+        "ollama" => Box::new(OllamaCleanup::new(ollama_model)),
+        "regex" => Box::new(RegexCleanup),
+        "none" => Box::new(PassthroughCleanup),
+        other => {
+            return Err(format!(
+                "unknown cleanup tier '{other}'. Use none, regex, onnx, or ollama."
+            ))
+        }
+    })
+}
+
 /// Request body for one Ollama `/api/chat` call, extracted for tests.
 ///
 /// Speed notes: `keep_alive` holds the model resident for a dictation
@@ -182,6 +235,54 @@ fn chat_once(endpoint: &str, model: &str, prompt: &str) -> Result<String, String
 mod tests {
     use super::*;
     use susurro_core::F1_MINIMUM;
+
+    #[test]
+    fn tiers_resolve_and_bad_names_are_rejected() {
+        let dir = std::env::temp_dir();
+        let punct = Some(PunctPaths {
+            model: dir.join("punct-model.onnx"),
+            vocab: dir.join("punct-model.vocab"),
+        });
+        // Construction never touches the disk, so every tier resolves
+        // even with no model present: the engine fails open at call
+        // time, not at build time.
+        for tier in ["onnx", "ollama", "regex", "none"] {
+            assert!(by_name(tier, punct.clone(), "qwen3:0.6b").is_ok(), "{tier}");
+        }
+        let err = by_name("nope", punct.clone(), "qwen3:0.6b")
+            .err()
+            .expect("unknown tier must not resolve");
+        assert!(err.contains("unknown cleanup tier"), "{err}");
+        assert!(err.contains("onnx"), "{err}");
+    }
+
+    #[test]
+    fn onnx_without_a_models_dir_says_what_to_do() {
+        let err = by_name("onnx", None, "qwen3:0.6b")
+            .err()
+            .expect("no models dir must not resolve");
+        assert!(err.contains("--cleanup regex"), "{err}");
+    }
+
+    #[test]
+    fn the_onnx_tier_fails_open_with_no_model() {
+        let dir = std::env::temp_dir();
+        let punct = Some(PunctPaths {
+            model: dir.join("absent-punct.onnx"),
+            vocab: dir.join("absent-punct.vocab"),
+        });
+        let cleaner = by_name("onnx", punct, "qwen3:0.6b").unwrap();
+        assert_eq!(cleaner.cleanup("  hello   world ").unwrap(), "hello world");
+    }
+
+    #[test]
+    fn none_is_the_raw_transcript() {
+        let cleaner = by_name("none", None, "qwen3:0.6b").unwrap();
+        assert_eq!(
+            cleaner.cleanup("  hello   world ").unwrap(),
+            "  hello   world "
+        );
+    }
 
     #[test]
     fn regex_collapses_and_tidies() {

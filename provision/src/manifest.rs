@@ -16,6 +16,14 @@ use serde::{Deserialize, Serialize};
 /// of trusting bytes they cannot verify.
 pub const ASSET_KEY_ID: &str = "susurro-assets-1";
 
+/// Cleanup model file name. The store keys every asset by name, so the
+/// cleanup adapter resolves its pair through the manifest rather than
+/// hardcoding a path.
+pub const PUNCT_MODEL_NAME: &str = "punct-cnn-bilstm.int8.onnx";
+/// BPE vocabulary that travels with [`PUNCT_MODEL_NAME`]. The model
+/// is useless without it, so they are fetched as one unit.
+pub const PUNCT_VOCAB_NAME: &str = "punct-bpe.vocab";
+
 /// Ed25519 public key for [`ASSET_KEY_ID`], lowercase hex. Generated
 /// with `cargo run -p susurro-provision --example keygen`; the secret
 /// half lives with the maintainer and never enters the repo.
@@ -77,6 +85,31 @@ pub fn default_manifest() -> Manifest {
                     "921e4cf8686fdd993dcd081a5da5b6c365bfde1162e72b08d75ac75289920b1f".into(),
                 ),
                 bytes: Some(77_704_715),
+            },
+            // Cleanup punctuation (ADR-004 Phase 4). The int8 CNN-BiLSTM
+            // English model from the sherpa-onnx online-punctuation
+            // release, plus its BPE vocabulary. Both pinned: the model
+            // decides what the user's words look like after dictation,
+            // so unverified bytes are not acceptable here.
+            Asset {
+                name: PUNCT_MODEL_NAME.into(),
+                version: "2024-08-06".into(),
+                url: "https://huggingface.co/brady-pplx/sherpa-onnx-online-punct-en-2024-08-06/resolve/main/model.int8.onnx"
+                    .into(),
+                sha256: Some(
+                    "9d611f445fe4a46186080fe161be6059d87d72eb88d3a8cb00c1a06e83a6067e".into(),
+                ),
+                bytes: Some(7_490_500),
+            },
+            Asset {
+                name: PUNCT_VOCAB_NAME.into(),
+                version: "2024-08-06".into(),
+                url: "https://huggingface.co/brady-pplx/sherpa-onnx-online-punct-en-2024-08-06/resolve/main/bpe.vocab"
+                    .into(),
+                sha256: Some(
+                    "e118b7ad88c54db562517df49e1cffd4836d166c34fb190fd311d7f34eb238f5".into(),
+                ),
+                bytes: Some(149_430),
             },
         ],
     }

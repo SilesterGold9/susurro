@@ -13,6 +13,7 @@ app-tauri/src-tauri/target/
 models/
 # day-0 bundle model: fetched by src-tauri/build.rs, pinned by hash
 app-tauri/src-tauri/resources/models/
+app-tauri/src-tauri/resources/dylib/*.dll
 
 # local agent scaffolding (Conclave) — installed files stay local,
 # but constitution + ledger are versioned precedent
