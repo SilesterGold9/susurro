@@ -62,12 +62,59 @@ impl Default for Settings {
     }
 }
 
+/// One manifest asset as the System page sees it. `Ready` is the
+/// only state that needs no explanation; the rest name their cause.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize)]
+#[serde(rename_all = "lowercase")]
+enum ConvergenceAssetState {
+    Ready,
+    /// On disk but inside a backoff window from an earlier failure.
+    Waiting,
+    Missing,
+}
+
+#[derive(Debug, Clone, serde::Serialize)]
+struct ConvergenceAsset {
+    name: String,
+    version: String,
+    state: ConvergenceAssetState,
+    next_retry_secs: u64,
+}
+
+/// One asset's persisted failure record, with the remedy spelled out
+/// so the page never has to map a category back to a sentence.
+#[derive(Debug, Clone, serde::Serialize)]
+struct ConvergenceAttempt {
+    category: String,
+    remedy: String,
+    attempts: u32,
+    next_retry_secs: u64,
+}
+
+#[derive(Debug, Clone, serde::Serialize)]
+struct ConvergenceView {
+    assets: Vec<ConvergenceAsset>,
+    converged: bool,
+    next_retry_secs: u64,
+    attempts: std::collections::BTreeMap<String, ConvergenceAttempt>,
+    models_dir: Option<String>,
+}
+
 struct AppState {
     settings: Mutex<Settings>,
     dir: PathBuf,
     /// Double-trigger guard: at most one dictation runs at a time.
     /// A second press while busy reports busy instead of stacking runs.
     inflight: std::sync::Arc<std::sync::atomic::AtomicBool>,
+    /// Bundled day-0 tiny, resolved from the resource dir at startup.
+    /// None in dev without resources or with SKIP_MODEL_FETCH builds.
+    bundled_tiny: Mutex<Option<PathBuf>>,
+    /// Model prefetch single-flight: one background base fetch at a
+    /// time; the download button joins it instead of doubling it.
+    prefetch: Mutex<Option<std::thread::JoinHandle<Result<String, String>>>>,
+    /// Boot-time convergence loop stop flag (ADR-004 point 5). The
+    /// loop polls this so app exit cuts a backoff short.
+    convergence_stop: std::sync::Arc<std::sync::atomic::AtomicBool>,
 }
 
 impl AppState {
@@ -117,6 +164,11 @@ impl AppState {
     }
 }
 
+/// Bundled day-0 tiny for this process, if the bundle ships one.
+fn bundled_of(state: &Arc<AppState>) -> Option<PathBuf> {
+    state.bundled_tiny.lock().ok().and_then(|b| b.clone())
+}
+
 fn shellexpand(p: &str) -> String {
     if let Some(rest) = p.strip_prefix("~/") {
         if let Ok(home) = std::env::var("HOME") {
@@ -139,28 +191,73 @@ fn models_home() -> Option<PathBuf> {
         .map(|home| PathBuf::from(home).join(".local/share/susurro/models"))
 }
 
-fn model_file(name: &str) -> Option<String> {
-    let p = models_home()?.join(name);
+fn model_file_in(dir: &std::path::Path, name: &str) -> Option<String> {
+    let p = dir.join(name);
     if p.exists() {
         return Some(p.to_string_lossy().into_owned());
     }
     None
 }
 
-fn resolve_whisper(explicit: &str) -> String {
+fn resolve_whisper(explicit: &str, bundled_tiny: Option<&std::path::Path>) -> String {
+    let env_model = std::env::var("SUSURRO_MODEL").ok();
+    let models_dir = models_home();
+    resolve_whisper_with(
+        explicit,
+        env_model.as_deref(),
+        tier_file().as_deref(),
+        models_dir.as_deref(),
+        bundled_tiny,
+    )
+}
+
+/// Stored benchmark tier file, when a previous run persisted one
+/// and the file is still on disk. Missing or broken reads as unset.
+fn tier_file() -> Option<std::path::PathBuf> {
+    let store = susurro_storage::SqliteSettings::open(&shared_db_path()).ok()?;
+    let tier = susurro_adapters_stt_local::bench::load_tier(&store)?;
+    let home = std::env::var("HOME")
+        .or_else(|_| std::env::var("USERPROFILE"))
+        .ok()?;
+    let path = tier.model_path(&home);
+    path.exists().then_some(path)
+}
+
+/// Full resolution order, pure except existence checks (mirrors the
+/// CLI resolver): explicit setting, SUSURRO_MODEL, benchmark tier
+/// file, best quality on disk (small, base, tiny), bundled day-0
+/// tiny, then the missing base path the error names.
+fn resolve_whisper_with(
+    explicit: &str,
+    env_model: Option<&str>,
+    tier_file: Option<&std::path::Path>,
+    models_dir: Option<&std::path::Path>,
+    bundled_tiny: Option<&std::path::Path>,
+) -> String {
     if !explicit.is_empty() {
         return shellexpand(explicit);
     }
-    if let Ok(m) = std::env::var("SUSURRO_MODEL") {
-        let p = shellexpand(&m);
+    if let Some(m) = env_model {
+        let p = shellexpand(m);
         if std::path::Path::new(&p).exists() {
             return p;
         }
     }
-    // First model actually on disk wins; the error names base.en.
-    for name in ["small.en.bin", "tiny.en.bin", "base.en.bin"] {
-        if let Some(p) = model_file(name) {
-            return p;
+    if let Some(t) = tier_file {
+        if t.exists() {
+            return t.to_string_lossy().into_owned();
+        }
+    }
+    if let Some(dir) = models_dir {
+        for name in ["small.en.bin", "base.en.bin", "tiny.en.bin"] {
+            if let Some(p) = model_file_in(dir, name) {
+                return p;
+            }
+        }
+    }
+    if let Some(bundled) = bundled_tiny {
+        if bundled.exists() {
+            return bundled.to_string_lossy().into_owned();
         }
     }
     shellexpand("~/.local/share/susurro/models/base.en.bin")
@@ -327,7 +424,7 @@ struct OnboardingStatus {
 #[tauri::command]
 fn onboarding_status(state: State<'_, Arc<AppState>>) -> Result<OnboardingStatus, String> {
     let settings = state.settings.lock().map_err(|e| e.to_string())?.clone();
-    let path = resolve_whisper(&settings.whisper_model);
+    let path = resolve_whisper(&settings.whisper_model, bundled_of(&state).as_deref());
     let model_found = std::path::Path::new(&path).exists();
     let model_checksum = checksum_line(&path);
     let tier = susurro_storage::SqliteSettings::open(&shared_db_path())
@@ -362,49 +459,27 @@ fn checksum_line(path: &str) -> String {
     }
 }
 
-/// Last whole percentage in a curl progress-bar chunk, if any.
-/// The bar rewrites one carriage-return line ending in `NN.N%`;
-/// scanning for the last `%` keeps partial reads convergent.
-fn curl_progress_pct(chunk: &[u8]) -> Option<u64> {
-    let text = String::from_utf8_lossy(chunk);
-    let idx = text.rfind('%')?;
-    let digits: String = text[..idx]
-        .chars()
-        .rev()
-        .take_while(|c| c.is_ascii_digit() || *c == '.')
-        .collect::<String>()
-        .chars()
-        .rev()
-        .collect();
-    let whole = digits.split('.').next().unwrap_or("");
-    if whole.is_empty() {
-        return None;
-    }
-    whole.parse::<u64>().ok().filter(|p| *p <= 100)
-}
-
 /// System requirements for onboarding screen one (Windows audit):
-/// whisper binary, model, and paste tools with per-OS install hints.
-/// Nothing here blocks: each item names its own fix.
+/// linked engine, model, and paste tools with per-OS install hints.
+/// The engine is linked in, so whisper is always ready: only the
+/// model can still be missing. Nothing here blocks: each item names
+/// its own fix.
 #[tauri::command]
 fn requirements_status(state: State<'_, Arc<AppState>>) -> Result<serde_json::Value, String> {
+    requirements_data(&state)
+}
+
+/// Shared probe body: onboarding and System read the same object,
+/// so the two screens can never disagree about the machine.
+fn requirements_data(
+    state: &State<'_, Arc<AppState>>,
+) -> Result<serde_json::Value, String> {
     let settings = state.settings.lock().map_err(|e| e.to_string())?.clone();
-    let whisper = susurro_core::silent_command("whisper-cli")
-        .arg("--version")
-        .output()
-        .ok()
-        .filter(|o| o.status.success())
-        .map(|o| {
-            String::from_utf8_lossy(&o.stdout)
-                .lines()
-                .next()
-                .unwrap_or("whisper-cli")
-                .trim()
-                .chars()
-                .take(40)
-                .collect::<String>()
-        });
-    let model_path = resolve_whisper(&settings.whisper_model);
+    let whisper = Some(format!(
+        "native whisper.cpp {} (linked, no install needed)",
+        susurro_adapters_stt_local::native::linked_version()
+    ));
+    let model_path = resolve_whisper(&settings.whisper_model, bundled_of(state).as_deref());
     let model_found = std::path::Path::new(&model_path).exists();
     #[cfg(target_os = "windows")]
     let os = "windows";
@@ -440,13 +515,8 @@ fn requirements_status(state: State<'_, Arc<AppState>>) -> Result<serde_json::Va
             )
         }
     };
-    let whisper_hint = if whisper.is_some() {
-        String::new()
-    } else if os == "windows" {
-        "Install whisper.cpp for Windows: unzip a whisper-cli.exe build plus its DLLs into one folder, add that folder to PATH (MSVC redist may be required), then recheck.".into()
-    } else {
-        "Install whisper.cpp (distro package or build from source) so whisper-cli is on PATH, then recheck.".into()
-    };
+    // The engine ships linked: no binary to install, no hint needed.
+    let whisper_hint = String::new();
     // Cleanup chain (Windows audit): the Ollama API is identical on
     // every OS, so one probe covers all. The model must be pulled,
     // not just the server up.
@@ -487,97 +557,273 @@ fn requirements_status(state: State<'_, Arc<AppState>>) -> Result<serde_json::Va
     }))
 }
 
-/// Download base.en from the whisper.cpp release mirror into the
-/// models dir. Atomic temp plus rename, so a retry converges instead
-/// of leaving a half file behind. Progress rides the onboarding
-/// event as percentages parsed from the transfer bar.
+/// Live capability matrix for the System page (Phase 3): the same
+/// requirements object onboarding sees, merged with the provision
+/// asset report, the resolved model plus tier, and the prefetch
+/// state. One endpoint, no second opinion about the machine.
 #[tauri::command]
-fn download_model(app: AppHandle) -> Result<String, String> {
-    const MODEL_URL: &str =
-        "https://huggingface.co/ggerganov/whisper.cpp/resolve/main/ggml-base.en.bin";
-    let dir = models_home().ok_or_else(|| "no models dir on this machine.".to_string())?;
-    std::fs::create_dir_all(&dir).map_err(|e| e.to_string())?;
-    let dest = dir.join("base.en.bin");
-    if dest.exists() {
-        return Ok(dest.to_string_lossy().into_owned());
+fn system_status(state: State<'_, Arc<AppState>>) -> Result<serde_json::Value, String> {
+    let mut status = requirements_data(&state)?;
+    let settings = state.settings.lock().map_err(|e| e.to_string())?.clone();
+    let bundled = bundled_of(&state);
+    let manifest = susurro_provision::default_manifest();
+    let models = match models_home() {
+        Some(dir) => susurro_provision::health(&manifest, &dir, bundled.as_deref()),
+        None => Vec::new(),
+    };
+    let resolved = resolve_whisper(&settings.whisper_model, bundled.as_deref());
+    let tier = susurro_storage::SqliteSettings::open(&shared_db_path())
+        .ok()
+        .and_then(|s| susurro_adapters_stt_local::bench::load_tier(&s))
+        .map(|t| t.as_str().to_string());
+    let prefetch_running = state
+        .prefetch
+        .lock()
+        .map(|p| p.is_some())
+        .unwrap_or(false);
+    let map = status
+        .as_object_mut()
+        .ok_or_else(|| "requirements malformed".to_string())?;
+    map.insert(
+        "engine".to_string(),
+        serde_json::json!({
+            "kind": "native",
+            "version": susurro_adapters_stt_local::native::linked_version(),
+        }),
+    );
+    map.insert(
+        "models".to_string(),
+        serde_json::to_value(&models).map_err(|e| e.to_string())?,
+    );
+    map.insert("resolved_path".to_string(), resolved.into());
+    map.insert("tier".to_string(), tier.into());
+    map.insert("prefetch_running".to_string(), prefetch_running.into());
+    map.insert(
+        "convergence".to_string(),
+        serde_json::to_value(convergence_snapshot(bundled.as_deref())).unwrap_or_default(),
+    );
+    Ok(status)
+}
+
+/// Convergence status for the System page (ADR-004 point 5). The
+/// same `susurro-provision` report the CLI prints, so the two
+/// surfaces can never disagree about what is missing or when the
+/// retry loop next acts.
+#[tauri::command]
+fn converge_status(state: State<'_, Arc<AppState>>) -> Result<serde_json::Value, String> {
+    serde_json::to_value(convergence_snapshot(bundled_of(&state).as_deref()))
+        .map_err(|e| e.to_string())
+}
+
+/// One read-only pass over the plane, plus the persisted retry
+/// state. No downloads happen here: the boot loop owns fetching, so
+/// a page refresh cannot start a 150 MB transfer.
+fn convergence_snapshot(bundled: Option<&std::path::Path>) -> ConvergenceView {
+    let Some(dir) = models_home() else {
+        return ConvergenceView {
+            assets: Vec::new(),
+            converged: false,
+            next_retry_secs: 0,
+            attempts: std::collections::BTreeMap::new(),
+            models_dir: None,
+        };
+    };
+    let manifest = susurro_provision::default_manifest();
+    let report = susurro_provision::health(&manifest, &dir, bundled);
+    let retry_state = susurro_provision::ConvergeState::load(&dir);
+    let mut attempts = std::collections::BTreeMap::new();
+    let mut next_retry_secs = 0;
+    for (name, failure) in &retry_state.assets {
+        attempts.insert(
+            name.clone(),
+            ConvergenceAttempt {
+                category: format!("{:?}", failure.category),
+                remedy: failure.category.remedy().to_string(),
+                attempts: failure.attempts,
+                next_retry_secs: susurro_provision::backoff_secs(failure.attempts),
+            },
+        );
+        next_retry_secs = next_retry_secs.max(susurro_provision::backoff_secs(failure.attempts));
     }
-    let tmp = dir.join("base.en.bin.tmp");
+    let mut assets = Vec::new();
+    for asset in &report {
+        // A verified copy needs no row beyond "ready"; anything else
+        // carries the reason so the page can name the fix.
+        let next_retry_secs = retry_state.delay_for(&asset.name);
+        let asset_state = match asset.copies.iter().find(|c| c.bytes_ok) {
+            Some(_) if retry_state.attempts_for(&asset.name) == 0 => ConvergenceAssetState::Ready,
+            Some(_) => ConvergenceAssetState::Waiting,
+            None => ConvergenceAssetState::Missing,
+        };
+        assets.push(ConvergenceAsset {
+            name: asset.name.clone(),
+            version: asset.version.clone(),
+            state: asset_state,
+            next_retry_secs,
+        });
+    }
+    next_retry_secs = next_retry_secs.max(
+        assets
+            .iter()
+            .map(|a| a.next_retry_secs)
+            .max()
+            .unwrap_or(0),
+    );
+    ConvergenceView {
+        converged: assets
+            .iter()
+            .all(|a| a.state == ConvergenceAssetState::Ready),
+        assets,
+        next_retry_secs,
+        attempts,
+        models_dir: Some(dir.to_string_lossy().into_owned()),
+    }
+}
+
+/// Start the convergence loop on a background thread (ADR-004 point
+/// 5: runs on boot). The loop stops when every asset is on disk or a
+/// failure needs a human, and the shared stop flag lets app exit cut
+/// a backoff short instead of parking the thread for 15 minutes.
+fn spawn_convergence(app: AppHandle, state: Arc<AppState>) {
+    let Some(dir) = models_home() else {
+        return;
+    };
+    let bundled = bundled_of(&state);
+    std::thread::spawn(move || {
+        let manifest = susurro_provision::default_manifest();
+        let mut converger =
+            susurro_provision::Converger::new(manifest, dir, bundled);
+        let stop = state.convergence_stop.clone();
+        converger.run_until_converged(
+            6,
+            &|| stop.load(std::sync::atomic::Ordering::SeqCst),
+            &|d| {
+                // Chunked sleep so exit is noticed within a second,
+                // not at the end of a 15-minute backoff.
+                let mut left = d;
+                while !left.is_zero()
+                    && !stop.load(std::sync::atomic::Ordering::SeqCst)
+                {
+                    let step = left.min(std::time::Duration::from_secs(1));
+                    std::thread::sleep(step);
+                    left -= step;
+                }
+                stop.load(std::sync::atomic::Ordering::SeqCst)
+            },
+            &|report| {
+                let _ = app.emit(
+                    "susurro://convergence",
+                    serde_json::json!({
+                        "converged": report.converged,
+                        "next_retry_secs": report.next_delay_secs(),
+                        "assets": report.assets,
+                    }),
+                );
+            },
+        );
+    });
+}
+
+/// Fetch one asset with onboarding progress events, then record
+/// trust-on-first-use plus the manifest version. Shared by the
+/// button and the background prefetch: same bytes, same records.
+/// Resume, hash-while-write, and atomic swap live in
+/// `susurro-provision`.
+fn fetch_asset_with_progress(
+    app: &AppHandle,
+    asset_name: &str,
+    force: bool,
+) -> Result<String, String> {
+    let dir = models_home().ok_or_else(|| "no models dir on this machine.".to_string())?;
+    let manifest = susurro_provision::default_manifest();
+    // The manifest outlives this borrow: clone the entry we need.
+    let asset = susurro_provision::select_asset(&manifest, asset_name)
+        .ok_or_else(|| format!("{asset_name} vanished from the asset manifest."))?
+        .clone();
     let _ = app.emit(
         "susurro://onboarding",
         serde_json::json!({ "step": "model", "state": "downloading", "pct": 0 }),
     );
-    // Progress bar on stderr: parse trailing percentages off the
-    // carriage-return updates and emit whole points upward only.
-    let mut child = susurro_core::silent_command("curl")
-        .args([
-            "-sSL",
-            "--fail",
-            "--progress-bar",
-            MODEL_URL,
-            "-o",
-            &tmp.to_string_lossy(),
-        ])
-        .stderr(std::process::Stdio::piped())
-        .spawn()
-        .map_err(|e| format!("Couldn't run curl (is curl installed?): {e}"))?;
-    if let Some(stderr) = child.stderr.take() {
-        use std::io::Read;
-        let progress_app = app.clone();
-        std::thread::spawn(move || {
-            let mut last = 0u64;
-            let mut buf = [0u8; 1024];
-            let mut tail = Vec::new();
-            let mut reader: Box<dyn Read> = Box::new(stderr);
-            loop {
-                match reader.read(&mut buf) {
-                    Ok(0) => break,
-                    Ok(n) => {
-                        tail.extend_from_slice(&buf[..n]);
-                        if let Some(pct) = curl_progress_pct(&tail) {
-                            if pct > last {
-                                last = pct;
-                                let _ = progress_app.emit(
-                                    "susurro://onboarding",
-                                    serde_json::json!({
-                                        "step": "model",
-                                        "state": "downloading",
-                                        "pct": pct,
-                                    }),
-                                );
-                            }
-                        }
-                        if tail.len() > 4096 {
-                            tail.drain(..tail.len() - 1024);
-                        }
-                    }
-                    Err(_) => break,
-                }
+    // Whole points upward only, like the old bar parser.
+    let last = std::cell::Cell::new(0u64);
+    let progress_app = app.clone();
+    let path = susurro_provision::ensure_asset(&dir, &asset, force, &|done, total| {
+        if let Some(total) = total.filter(|t| *t > 0) {
+            let pct = done.saturating_mul(100) / total;
+            if pct > last.get() {
+                last.set(pct);
+                let _ = progress_app.emit(
+                    "susurro://onboarding",
+                    serde_json::json!({
+                        "step": "model",
+                        "state": "downloading",
+                        "pct": pct,
+                    }),
+                );
             }
-        });
-    }
-    let status = child
-        .wait()
-        .map_err(|e| format!("model download failed: {e}"))?;
-    if !status.success() {
-        let _ = std::fs::remove_file(&tmp);
+        }
+    })
+    .map_err(|e| {
         let _ = app.emit(
             "susurro://onboarding",
             serde_json::json!({ "step": "model", "state": "failed" }),
         );
-        return Err("model download failed. Check the network and retry.".into());
-    }
-    std::fs::rename(&tmp, &dest).map_err(|e| e.to_string())?;
+        e.to_string()
+    })?;
     // Trust on first use starts at download: the fresh bytes are the
-    // reference every later run compares against.
+    // reference every later run compares against. The manifest
+    // version rides beside the hash so upgrades can promote.
     if let Ok(mut store) = susurro_storage::SqliteSettings::open(&shared_db_path()) {
         use susurro_adapters_stt_local::checksum::verify_model;
-        let _ = verify_model(&dest, &mut store);
+        use susurro_core::ports::SettingsStorePort;
+        let _ = verify_model(&path, &mut store);
+        let _ = store.set(&format!("asset_version:{asset_name}"), &asset.version);
     }
     let _ = app.emit(
         "susurro://onboarding",
         serde_json::json!({ "step": "model", "state": "done" }),
     );
-    Ok(dest.to_string_lossy().into_owned())
+    Ok(path.to_string_lossy().into_owned())
+}
+
+/// Explicit model download: joins the background prefetch when one
+/// is running instead of doubling the transfer.
+#[tauri::command]
+fn download_model(app: AppHandle, state: State<'_, Arc<AppState>>) -> Result<String, String> {
+    let handle = state.prefetch.lock().map_err(|e| e.to_string())?.take();
+    match handle {
+        Some(join) => join.join().map_err(|_| "background fetch panicked".to_string())?,
+        None => fetch_asset_with_progress(&app, "base.en.bin", false),
+    }
+}
+
+/// Background base fetch plus auto-bench, started on onboarding
+/// first paint: the user picks intent, tone, and hotkey while the
+/// bytes stream. Single-flight: a second call reports instead of
+/// spawning. The done event refreshes every screen listening.
+#[tauri::command]
+fn start_model_prefetch(app: AppHandle, state: State<'_, Arc<AppState>>) -> Result<String, String> {
+    {
+        let guard = state.prefetch.lock().map_err(|e| e.to_string())?;
+        if guard.is_some() {
+            return Ok("base fetch already running.".into());
+        }
+    }
+    let worker_app = app.clone();
+    let join = std::thread::spawn(move || {
+        // Bench first (sub-second): the tier is recorded before the
+        // slow download finishes, so resolution promotes correctly.
+        {
+            use susurro_adapters_stt_local::bench;
+            let (tier, _) = bench::benchmark();
+            if let Ok(mut store) = susurro_storage::SqliteSettings::open(&shared_db_path()) {
+                let _ = bench::store_tier(&mut store, tier);
+            }
+        }
+        fetch_asset_with_progress(&worker_app, "base.en.bin", false)
+    });
+    *state.prefetch.lock().map_err(|e| e.to_string())? = Some(join);
+    Ok("base fetch started in the background.".into())
 }
 
 /// Run the CPU benchmark and persist the winning tier, same as the
@@ -614,7 +860,7 @@ fn test_dictation(
     let mut settings = state.settings.lock().map_err(|e| e.to_string())?.clone();
     settings.seconds = 6;
     let tickets = TicketRegistry::new();
-    let out = run_dictation(&app, &settings, &tickets);
+    let out = run_dictation(&app, &settings, &tickets, bundled_of(&state).as_deref());
     state.release();
     out
 }
@@ -1066,6 +1312,7 @@ fn run_dictation(
     app: &AppHandle,
     settings: &Settings,
     tickets: &TicketRegistry,
+    bundled_tiny: Option<&std::path::Path>,
 ) -> Result<UtteranceResult, String> {
     let t0 = std::time::Instant::now();
     emit_state(app, "listening");
@@ -1096,8 +1343,8 @@ fn run_dictation(
     let pcm = capture_pcm(app, settings, &cues)?;
 
     emit_state(app, "processing");
-    let stt = susurro_adapters_stt_local::WhisperLocal::base_en(
-        resolve_whisper(&settings.whisper_model).into(),
+    let stt = susurro_adapters_stt_local::native::WhisperNative::base_en(
+        resolve_whisper(&settings.whisper_model, bundled_tiny).into(),
     );
     let passthrough = susurro_adapters_cleanup::PassthroughCleanup;
     let regex = susurro_adapters_cleanup::RegexCleanup;
@@ -1359,7 +1606,7 @@ fn start_dictation(
     let settings = state.settings.lock().map_err(|e| e.to_string())?.clone();
     let tickets = TicketRegistry::new();
     show_pill(&app, settings.sound);
-    let out = run_dictation(&app, &settings, &tickets);
+    let out = run_dictation(&app, &settings, &tickets, bundled_of(&state).as_deref());
     state.release();
     out
 }
@@ -1408,7 +1655,7 @@ fn spawn_hotkey_listener(app: AppHandle, state: Arc<AppState>) {
             }
             show_pill(&app, state.settings.lock().map(|s| s.sound).unwrap_or(true));
             let settings = state.settings.lock().map(|s| s.clone()).unwrap_or_default();
-            let _ = run_dictation(&app, &settings, &tickets);
+            let _ = run_dictation(&app, &settings, &tickets, bundled_of(&state).as_deref());
             state.release();
         }
     });
@@ -1439,7 +1686,7 @@ fn build_tray(app: &AppHandle) -> Result<(), Box<dyn std::error::Error>> {
                     }
                     let settings = state.settings.lock().map(|s| s.clone()).unwrap_or_default();
                     let tickets = TicketRegistry::new();
-                    let _ = run_dictation(&handle, &settings, &tickets);
+                    let _ = run_dictation(&handle, &settings, &tickets, bundled_of(&state).as_deref());
                     state.release();
                 });
             }
@@ -1449,7 +1696,15 @@ fn build_tray(app: &AppHandle) -> Result<(), Box<dyn std::error::Error>> {
                     let _ = w.set_focus();
                 }
             }
-            "quit" => app.exit(0),
+            "quit" => {
+                // Stop the convergence loop before exit: a thread
+                // parked on a 15-minute backoff would outlive the
+                // window the user just closed.
+                if let Some(state) = app.try_state::<Arc<AppState>>() {
+                    state.convergence_stop.store(true, std::sync::atomic::Ordering::SeqCst);
+                }
+                app.exit(0)
+            }
             _ => {}
         })
         .build(app)?;
@@ -1472,8 +1727,12 @@ fn main() {
         settings: Mutex::new(AppState::load(&ctx_dir)),
         dir: ctx_dir,
         inflight: std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
+        bundled_tiny: Mutex::new(None),
+        prefetch: Mutex::new(None),
+        convergence_stop: std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
     });
     let hotkey_state = app_state.clone();
+    let resource_state = app_state.clone();
 
     tauri::Builder::default()
         .plugin(tauri_plugin_updater::Builder::new().build())
@@ -1499,7 +1758,10 @@ fn main() {
             show_onboarding,
             onboarding_status,
             requirements_status,
+            system_status,
+            converge_status,
             download_model,
+            start_model_prefetch,
             run_bench,
             test_dictation,
             hotkey_snippet,
@@ -1510,7 +1772,23 @@ fn main() {
         ])
         .setup(move |app| {
             spawn_hotkey_listener(app.handle().clone(), hotkey_state.clone());
+            // Day-0 model: resolve the bundled tiny once, so every
+            // later resolution finds it without an AppHandle.
+            if let Ok(resource_dir) = app.path().resource_dir() {
+                let bundled = resource_dir.join("models/tiny.en.bin");
+                if bundled.exists() {
+                    *resource_state.bundled_tiny.lock().unwrap_or_else(|e| e.into_inner()) =
+                        Some(bundled);
+                }
+            }
             build_tray(app.handle())?;
+            // Convergence loop on boot (ADR-004 point 5). It runs
+            // beside onboarding: the bundled tiny already makes
+            // dictation work offline, so the loop only fills in what
+            // the bundle cannot carry.
+            let converge_handle = app.handle().clone();
+            let converge_state = app.state::<Arc<AppState>>().inner().clone();
+            spawn_convergence(converge_handle, converge_state);
             // Startup inventory: every window with its label, visibility,
             // and URL. Diagnosing wrong-window reports starts here.
             for (label, w) in app.webview_windows() {
@@ -1578,5 +1856,63 @@ mod tests {
         assert!(back.high_contrast);
         assert!(!back.announce);
         assert_eq!(back.hotkey, "shift_d");
+    }
+
+    fn resolve_tmp(tag: &str) -> std::path::PathBuf {
+        let dir = std::env::temp_dir().join(format!(
+            "susurro-resolve-{tag}-{}",
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        dir
+    }
+
+    #[test]
+    fn resolution_prefers_tier_then_quality_then_bundled() {
+        let models = resolve_tmp("models");
+        let tiny = models.join("tiny.en.bin");
+        std::fs::write(&tiny, b"tiny").unwrap();
+        let bundled_dir = resolve_tmp("bundled");
+        let bundled = bundled_dir.join("tiny.en.bin");
+        std::fs::write(&bundled, b"bundled").unwrap();
+
+        // Explicit wins even when missing: the caller named it.
+        assert_eq!(
+            resolve_whisper_with("/explicit/m.bin", None, None, Some(&models), Some(&bundled)),
+            "/explicit/m.bin"
+        );
+        // Tier file wins over everything on disk.
+        let tier_dir = resolve_tmp("tier");
+        let tier = tier_dir.join("small.en.bin");
+        std::fs::write(&tier, b"small").unwrap();
+        assert_eq!(
+            resolve_whisper_with("", None, Some(&tier), Some(&models), Some(&bundled)),
+            tier.to_string_lossy().into_owned()
+        );
+        // Missing tier falls through to best quality on disk.
+        let base = models.join("base.en.bin");
+        std::fs::write(&base, b"base").unwrap();
+        assert_eq!(
+            resolve_whisper_with(
+                "",
+                None,
+                Some(&models.join("absent.bin")),
+                Some(&models),
+                Some(&bundled)
+            ),
+            base.to_string_lossy().into_owned()
+        );
+        // Empty models dir falls through to the bundled day-0 tiny.
+        let empty = resolve_tmp("empty");
+        assert_eq!(
+            resolve_whisper_with("", None, None, Some(&empty), Some(&bundled)),
+            bundled.to_string_lossy().into_owned()
+        );
+        // Nothing anywhere names the missing base path.
+        let missing = resolve_whisper_with("", None, None, Some(&empty), None);
+        assert!(missing.ends_with("base.en.bin"), "{missing}");
     }
 }
