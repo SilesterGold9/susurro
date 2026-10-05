@@ -1,6 +1,8 @@
 # 002: whisper.cpp for local speech to text
 
-Status: accepted
+Status: partially superseded by 004 Phase 1 (2026-10-02): the engine is
+now linked in-process (`WhisperNative`); the shell-out documented below
+survives as the `--engine cli` escape hatch, and the OpenVINO path with it.
 Date: 2026-09-30
 Relates to: v0.7.0 polish and dx, issue 37, v0.0.1 proof of concept, v0.4.0 performance pass, v0.5.0 Intel aware work
 

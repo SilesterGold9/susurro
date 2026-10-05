@@ -1,20 +1,25 @@
 //! Local STT adapters (v0.0.1).
 //!
 //! - `MockStt`: deterministic transcript for tests/CI.
-//! - `WhisperLocal`: shells out to a `whisper-cpp`/`whisper-cli` binary
-//!   if present, else returns an actionable error telling the user
-//!   to install the model (base.en). Native whisper-rs binding lands
-//!   after v0.5.0 — this keeps CI light.
-//! - `openvino` (v0.5.0): encoder offload to iGPU via `--ov-e-device`.
-//!   The decoder always stays on CPU. Detection is best-effort and
-//!   anything missing falls back to CPU with the reason named.
-//! - `stt_bench` (v0.5.0): race the available local backends on
+//! - `WhisperNative` (Phase 1, ADR-004): whisper.cpp linked through
+//!   whisper-rs, decoded in process. The default engine: no binary,
+//!   no PATH, no spawn cost. CPU only; GPU stays future work.
+//! - `WhisperLocal`: the original shell-out to a `whisper-cli`
+//!   binary. Kept as the `--engine cli` escape hatch (distro builds,
+//!   OpenVINO encoder offload); no longer the default anywhere.
+//! - `openvino` (v0.5.0): encoder offload to iGPU via `--ov-e-device`,
+//!   shell-out engine only. The decoder always stays on CPU.
+//!   Detection is best-effort and anything missing falls back to
+//!   CPU with the reason named.
+//! - `stt_bench` (v0.5.0): race the available shell-out backends on
 //!   synthesized audio; the winner persists and `--backend auto`
-//!   honors it. The ONNX EP slot detects only until its runner lands.
+//!   honors it for the cli engine. The ONNX EP slot detects only
+//!   until its runner lands.
 //! - `WindowedPartial` (v0.4.0): bounded-cost partial hypotheses for
-//!   live feedback. Decodes at most the trailing window on a cadence,
-//!   so extra CPU stays flat regardless of utterance length. Partials
-//!   are display-only; the final full decode decides the transcript.
+//!   live feedback over any `WindowDecoder` (native or shell-out).
+//!   Decodes at most the trailing window on a cadence, so extra CPU
+//!   stays flat regardless of utterance length. Partials are
+//!   display-only; the final full decode decides the transcript.
 //! - `bench` (v0.4.0): hardware auto-benchmark to model tier
 //!   selection. First run probes CPU throughput and persists the
 //!   tier; later runs reuse it.
@@ -25,8 +30,33 @@ use susurro_core::CoreError;
 
 pub mod bench;
 pub mod checksum;
+pub mod native;
 pub mod openvino;
 pub mod stt_bench;
+
+/// Which local engine decodes. Native is the default everywhere;
+/// Cli shells out to a user-installed `whisper-cli` (OpenVINO
+/// offload, distro builds, debugging the linked engine).
+#[derive(Clone, Copy, PartialEq, Eq, Debug, Default)]
+pub enum LocalEngine {
+    #[default]
+    Native,
+    Cli,
+}
+
+impl LocalEngine {
+    /// Parse the `--engine` flag. Unknown names fail the command
+    /// instead of silently picking an engine.
+    pub fn parse(s: &str) -> Result<Self, CoreError> {
+        match s {
+            "native" => Ok(Self::Native),
+            "cli" => Ok(Self::Cli),
+            other => Err(CoreError::Config(format!(
+                "unknown STT engine '{other}': use native or cli"
+            ))),
+        }
+    }
+}
 
 pub struct MockStt {
     pub text: String,
@@ -121,13 +151,29 @@ impl WhisperLocal {
 }
 
 /// True when the transcript holds nothing worth injecting: empty,
-/// whitespace, or a bracketed non-speech tag like [BLANK_AUDIO].
+/// whitespace, a lone bracketed non-speech tag like [BLANK_AUDIO],
+/// or a tag plus stray punctuation the decoder emits with it
+/// (`>> [BLANK_AUDIO]`). Anything with a letter or digit outside
+/// the tags stays injectable: `well (known) fact` is speech.
 pub fn is_blank_transcript(text: &str) -> bool {
-    let t = text.trim();
-    if t.is_empty() {
-        return true;
+    let mut rest = String::with_capacity(text.len());
+    let mut tag = false;
+    let mut tag_kind = b' ';
+    for c in text.chars() {
+        if tag {
+            if (tag_kind == b'[' && c == ']') || (tag_kind == b'(' && c == ')') {
+                tag = false;
+            }
+            continue;
+        }
+        if c == '[' || c == '(' {
+            tag = true;
+            tag_kind = c as u8;
+            continue;
+        }
+        rest.push(c);
     }
-    t.starts_with('[') && t.ends_with(']') || t.starts_with('(') && t.ends_with(')')
+    !rest.chars().any(|c| c.is_alphanumeric())
 }
 
 impl SpeechToTextPort for WhisperLocal {
@@ -211,23 +257,83 @@ pub const PARTIAL_MIN_NEW_SAMPLES: usize = 16_000 * 3;
 /// on tiny inputs, and the final decode covers short utterances.
 pub const PARTIAL_MIN_SAMPLES: usize = 16_000 * 2;
 
-/// Windowed partial decoder over a `WhisperLocal` config.
+/// A decoder that can do windowed work: raw window decode for
+/// partials, gated final decode, and a name. Both engines implement
+/// it, so the cadence logic below exists exactly once.
+pub trait WindowDecoder: Send + Sync {
+    fn decode_window(&self, window: &[i16]) -> Option<Result<String, CoreError>>;
+    fn transcribe_final(&self, pcm: &[i16]) -> Result<Transcript, CoreError>;
+    fn decoder_name(&self) -> &str;
+}
+
+impl WindowDecoder for WhisperLocal {
+    fn decode_window(&self, window: &[i16]) -> Option<Result<String, CoreError>> {
+        if !self.model_path.exists() {
+            return None;
+        }
+        let tmp = std::env::temp_dir().join(format!(
+            "susurro-partial-{}.wav",
+            susurro_core::SessionId::generate()
+        ));
+        if std::fs::write(&tmp, encode_wav_16k_mono(window)).is_err() {
+            return None;
+        }
+        let out = self.command(&tmp).output();
+        let _ = std::fs::remove_file(&tmp);
+        match out {
+            Ok(o) if o.status.success() => {
+                Some(Ok(String::from_utf8_lossy(&o.stdout).trim().to_string()))
+            }
+            _ => None,
+        }
+    }
+
+    fn transcribe_final(&self, pcm: &[i16]) -> Result<Transcript, CoreError> {
+        self.transcribe(pcm)
+    }
+
+    fn decoder_name(&self) -> &str {
+        self.model_name()
+    }
+}
+
+impl WindowDecoder for native::WhisperNative {
+    fn decode_window(&self, window: &[i16]) -> Option<Result<String, CoreError>> {
+        if !self.model_path.exists() {
+            return None;
+        }
+        match self.decode_text(window) {
+            Ok(text) => Some(Ok(text)),
+            Err(_) => None,
+        }
+    }
+
+    fn transcribe_final(&self, pcm: &[i16]) -> Result<Transcript, CoreError> {
+        self.transcribe(pcm)
+    }
+
+    fn decoder_name(&self) -> &str {
+        self.model_name()
+    }
+}
+
+/// Windowed partial decoder over any `WindowDecoder`.
 /// Call `partial` with the growing prefix during capture; it decodes
 /// at most the trailing window on the cadence above and returns None
-/// when there is nothing new worth the CPU. Blank output and binary
+/// when there is nothing new worth the CPU. Blank output and decode
 /// failures also yield None: partials are best-effort display, and the
 /// final full decode reports real errors.
-pub struct WindowedPartial {
-    pub whisper: WhisperLocal,
+pub struct WindowedPartial<W: WindowDecoder> {
+    pub decoder: W,
     pub window_samples: usize,
     pub min_new_samples: usize,
     last_len: std::sync::Mutex<usize>,
 }
 
-impl WindowedPartial {
-    pub fn new(whisper: WhisperLocal) -> Self {
+impl<W: WindowDecoder> WindowedPartial<W> {
+    pub fn new(decoder: W) -> Self {
         Self {
-            whisper,
+            decoder,
             window_samples: PARTIAL_WINDOW_SAMPLES,
             min_new_samples: PARTIAL_MIN_NEW_SAMPLES,
             last_len: std::sync::Mutex::new(0),
@@ -259,7 +365,7 @@ impl WindowedPartial {
         if let Ok(mut l) = self.last_len.lock() {
             *l = end;
         }
-        let text = match self.decode_window(&pcm[start..end]) {
+        let text = match self.decoder.decode_window(&pcm[start..end]) {
             Some(Ok(t)) if !is_blank_transcript(&t) => t,
             _ => return None,
         };
@@ -268,36 +374,15 @@ impl WindowedPartial {
             is_partial: true,
         }))
     }
-
-    fn decode_window(&self, window: &[i16]) -> Option<Result<String, CoreError>> {
-        if !self.whisper.model_path.exists() {
-            return None;
-        }
-        let tmp = std::env::temp_dir().join(format!(
-            "susurro-partial-{}.wav",
-            susurro_core::SessionId::generate()
-        ));
-        if std::fs::write(&tmp, encode_wav_16k_mono(window)).is_err() {
-            return None;
-        }
-        let out = self.whisper.command(&tmp).output();
-        let _ = std::fs::remove_file(&tmp);
-        match out {
-            Ok(o) if o.status.success() => {
-                Some(Ok(String::from_utf8_lossy(&o.stdout).trim().to_string()))
-            }
-            _ => None,
-        }
-    }
 }
 
-impl SpeechToTextPort for WindowedPartial {
+impl<W: WindowDecoder> SpeechToTextPort for WindowedPartial<W> {
     fn transcribe(&self, pcm: &[i16]) -> Result<Transcript, CoreError> {
-        self.whisper.transcribe(pcm)
+        self.decoder.transcribe_final(pcm)
     }
 
     fn model_name(&self) -> &str {
-        self.whisper.model_name()
+        self.decoder.decoder_name()
     }
 
     fn transcribe_partial(&self, pcm: &[i16]) -> Option<Result<Transcript, CoreError>> {
@@ -363,6 +448,8 @@ mod tests {
         assert!(is_blank_transcript("   "));
         assert!(is_blank_transcript("[BLANK_AUDIO]"));
         assert!(is_blank_transcript("(silence)"));
+        assert!(is_blank_transcript(">> [BLANK_AUDIO]"));
+        assert!(is_blank_transcript("[BLANK_AUDIO] ..."));
         assert!(!is_blank_transcript("hello world"));
         assert!(!is_blank_transcript("well (known) fact"));
     }
@@ -405,7 +492,7 @@ mod tests {
         use super::{WindowedPartial, PARTIAL_MIN_NEW_SAMPLES, PARTIAL_WINDOW_SAMPLES};
         // Under 2s never decodes.
         assert_eq!(
-            WindowedPartial::window_bounds(
+            WindowedPartial::<WhisperLocal>::window_bounds(
                 16_000,
                 PARTIAL_WINDOW_SAMPLES,
                 PARTIAL_MIN_NEW_SAMPLES,
@@ -415,7 +502,7 @@ mod tests {
         );
         // 5s decodes from the start (window longer than audio).
         assert_eq!(
-            WindowedPartial::window_bounds(
+            WindowedPartial::<WhisperLocal>::window_bounds(
                 80_000,
                 PARTIAL_WINDOW_SAMPLES,
                 PARTIAL_MIN_NEW_SAMPLES,
@@ -425,7 +512,7 @@ mod tests {
         );
         // 10s decodes the trailing 8s window.
         assert_eq!(
-            WindowedPartial::window_bounds(
+            WindowedPartial::<WhisperLocal>::window_bounds(
                 160_000,
                 PARTIAL_WINDOW_SAMPLES,
                 PARTIAL_MIN_NEW_SAMPLES,
@@ -435,7 +522,7 @@ mod tests {
         );
         // Same length twice decodes once; 1 sample short of cadence waits.
         assert_eq!(
-            WindowedPartial::window_bounds(
+            WindowedPartial::<WhisperLocal>::window_bounds(
                 80_000,
                 PARTIAL_WINDOW_SAMPLES,
                 PARTIAL_MIN_NEW_SAMPLES,
@@ -444,7 +531,7 @@ mod tests {
             None
         );
         assert_eq!(
-            WindowedPartial::window_bounds(
+            WindowedPartial::<WhisperLocal>::window_bounds(
                 80_000 + PARTIAL_MIN_NEW_SAMPLES - 1,
                 PARTIAL_WINDOW_SAMPLES,
                 PARTIAL_MIN_NEW_SAMPLES,
@@ -452,7 +539,7 @@ mod tests {
             ),
             None
         );
-        assert!(WindowedPartial::window_bounds(
+        assert!(WindowedPartial::<WhisperLocal>::window_bounds(
             80_000 + PARTIAL_MIN_NEW_SAMPLES,
             PARTIAL_WINDOW_SAMPLES,
             PARTIAL_MIN_NEW_SAMPLES,

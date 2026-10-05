@@ -9,6 +9,7 @@
 use std::path::PathBuf;
 use std::sync::{Mutex, OnceLock};
 use susurro_contracts as c;
+use susurro_core::ports::SpeechToTextPort;
 
 fn pcm() -> Vec<i16> {
     susurro_adapters_stt_local::stt_bench::synth_sine(1)
@@ -44,6 +45,29 @@ fn whisper_local_missing_model_errors_actionably() {
     c::check_stt_reports_or_errors(&stt, &pcm());
     c::check_stt_model_name(&stt);
     c::check_stt_partial_flag(&stt, &pcm());
+}
+
+#[test]
+fn whisper_native_missing_model_errors_actionably() {
+    let stt = susurro_adapters_stt_local::native::WhisperNative::base_en(PathBuf::from(
+        "/nonexistent-contract/base.en.bin",
+    ));
+    c::check_stt_reports_or_errors(&stt, &pcm());
+    c::check_stt_model_name(&stt);
+    c::check_stt_partial_flag(&stt, &pcm());
+    // The native error names the fetch, not a binary install.
+    let err = stt.transcribe(&pcm()).unwrap_err().to_string();
+    assert!(err.contains("model-fetch"), "{err}");
+}
+
+#[test]
+fn windowed_partial_over_native_stays_silent() {
+    use susurro_adapters_stt_local::{native::WhisperNative, WindowedPartial};
+    let native = WhisperNative::base_en(PathBuf::from("/nonexistent-contract/base.en.bin"));
+    let decoder = WindowedPartial::new(native);
+    c::check_stt_reports_or_errors(&decoder, &pcm());
+    c::check_stt_model_name(&decoder);
+    c::check_stt_partial_flag(&decoder, &pcm());
 }
 
 #[test]
