@@ -2219,6 +2219,29 @@ fn show_stats() -> anyhow::Result<()> {
     for d in &s.days {
         println!("- {}: {}", d.label, d.words);
     }
+    // Voice fingerprint (issue 64). Counting over stored history, so
+    // thin history prints "not yet" rather than a confident nothing.
+    println!("fingerprint:");
+    if s.fingerprint.top_words.is_empty() {
+        println!("- top words: not enough content words yet");
+    } else {
+        let words = s
+            .fingerprint
+            .top_words
+            .iter()
+            .map(|(w, n)| format!("{w} {n}"))
+            .collect::<Vec<_>>()
+            .join(", ");
+        println!("- top words: {words}");
+    }
+    match &s.fingerprint.catchphrase {
+        Some((phrase, n)) => println!("- catchphrase: \"{phrase}\" ({n} times)"),
+        None => println!("- catchphrase: none repeated yet"),
+    }
+    match s.fingerprint.peak_hour {
+        Some((hour, n)) => println!("- peak hour: {hour:02}:00 UTC ({n} sessions)"),
+        None => println!("- peak hour: not enough dated sessions yet"),
+    }
     Ok(())
 }
 

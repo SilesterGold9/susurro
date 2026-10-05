@@ -72,6 +72,12 @@ export interface UsageStats {
   p95_ms: number;
   p99_ms: number;
   days: { label: string; words: number }[];
+  /** Issue 64. Null fields mean the history is too thin to say. */
+  fingerprint: {
+    top_words: { word: string; count: number }[];
+    catchphrase: { phrase: string; count: number } | null;
+    peak_hour: { hour: number; sessions: number } | null;
+  };
 }
 
 export default function SettingsView() {

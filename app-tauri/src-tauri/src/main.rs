@@ -440,12 +440,22 @@ fn get_stats() -> Result<serde_json::Value, String> {
         "dict_phrases": dict.len(),
         "streak_days": s.streak_days,
         "top_apps": s.top_apps.iter().map(|(a, n)| serde_json::json!({"app": a, "sessions": n})).collect::<Vec<_>>(),
-        "p50_ms": s.p50_ms,
-        "p95_ms": s.p95_ms,
-        "p99_ms": s.p99_ms,
-        "days": s.days.iter().map(|d| serde_json::json!({"label": d.label, "words": d.words})).collect::<Vec<_>>(),
-    }))
-}
+"p50_ms": s.p50_ms,
+           "p95_ms": s.p95_ms,
+           "p99_ms": s.p99_ms,
+           "days": s.days.iter().map(|d| serde_json::json!({"label": d.label, "words": d.words})).collect::<Vec<_>>(),
+           // Voice fingerprint (issue 64). Absent keys read as null on
+           // the page, which is the honest signal that history is too
+           // thin for a pattern.
+           "fingerprint": serde_json::json!({
+               "top_words": s.fingerprint.top_words.iter()
+                   .map(|(w, n)| serde_json::json!({"word": w, "count": n}))
+                   .collect::<Vec<_>>(),
+               "catchphrase": s.fingerprint.catchphrase.as_ref().map(|(p, n)| serde_json::json!({"phrase": p, "count": n})),
+               "peak_hour": s.fingerprint.peak_hour.map(|(h, n)| serde_json::json!({"hour": h, "sessions": n})),
+           }),
+       }))
+   }
 
 /// Remove an app formatting profile (falls back to the cleanup setting).
 #[tauri::command]

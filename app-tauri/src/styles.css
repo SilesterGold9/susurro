@@ -418,6 +418,14 @@ html { background: transparent; }
 .flow-bar-row { display: flex; align-items: center; gap: 10px; margin: 8px 0; }
 .flow-bar-label { width: 110px; flex: none; font-size: 13px; }
 .flow-bar-num { width: 90px; flex: none; text-align: right; font-size: 12px; opacity: 0.7; }
+/* Fingerprint catchphrase: set in the serif face, large enough to read
+   as a phrase rather than a data row. */
+.flow-quote {
+  font-family: Georgia, serif;
+  font-size: 22px;
+  line-height: 1.35;
+  margin: 4px 0 8px;
+}
 /* High contrast carries into the shell. */
 .high-contrast .flow, .flow.high-contrast {
   background: #fff;

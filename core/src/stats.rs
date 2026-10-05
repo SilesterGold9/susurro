@@ -1,4 +1,5 @@
-//! Usage plus latency stats (v0.9.0, issue 43).
+//! Usage plus latency stats (v0.9.0, issue 43) and the voice
+//! fingerprint (issue 64).
 //!
 //! The user-facing half of observability: per-day words, polished
 //! entries, dictionary hits, top apps, and a streak. The engineering
@@ -6,6 +7,11 @@
 //! pure: storage fetches rows, this module does the math, callers
 //! print it. Rows with `created_at` zero predate day tracking and
 //! count toward totals only.
+//!
+//! The fingerprint is the cheap half of a voice profile: counting over
+//! history we already store. No model, no topic clustering. Every
+//! result is deterministic, because a card that reshuffles between two
+//! identical reads is a card nobody trusts.
 
 use crate::ports::HistoryEntry;
 
@@ -29,6 +35,119 @@ pub struct Summary {
     pub days: Vec<DayCount>,
     pub streak_days: u64,
     pub top_apps: Vec<(String, usize)>,
+    /// Issue 64. `None` where history is too thin to say anything
+    /// honest rather than a confident-looking zero.
+    pub fingerprint: VoiceFingerprint,
+}
+
+/// What counting can honestly claim about how someone dictates
+/// (issue 64). Three cards: the words they lean on, the phrase they
+/// repeat, and when they talk.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct VoiceFingerprint {
+    /// Most-used words after stopword removal, most frequent first.
+    pub top_words: Vec<(String, usize)>,
+    /// Most frequent word trigram, the "catchphrase".
+    pub catchphrase: Option<(String, usize)>,
+    /// Busiest hour of the day, 0-23, with the session count.
+    pub peak_hour: Option<(u32, usize)>,
+}
+
+/// Words carrying no signal in a frequency ranking. Short and common
+/// enough that counting them tells you about English, not about the
+/// speaker. Deliberately small: an aggressive list would strip real
+/// signal like "not" or "because" out of a working user's vocabulary.
+const STOPWORDS: &[&str] = &[
+    "a", "about", "all", "am", "an", "and", "any", "are", "as", "at", "be", "been", "but", "by",
+    "can", "did", "do", "does", "for", "from", "get", "had", "has", "have", "he", "her", "him",
+    "his", "how", "i", "if", "in", "into", "is", "it", "its", "just", "like", "me", "my", "no",
+    "not", "of", "on", "one", "or", "our", "out", "she", "so", "some", "than", "that", "the",
+    "their", "them", "then", "there", "these", "they", "this", "to", "up", "us", "was", "we",
+    "were", "what", "when", "which", "who", "will", "with", "would", "you", "your",
+];
+
+/// Lowercase alphanumeric words with stopwords removed. Shared by the
+/// word counts and the catchphrase so both see the same tokens.
+fn content_words(text: &str) -> Vec<String> {
+    text.split(|c: char| !c.is_alphanumeric())
+        .filter(|w| w.len() > 1)
+        .map(str::to_lowercase)
+        .filter(|w| !STOPWORDS.contains(&w.as_str()))
+        .collect()
+}
+
+/// The voice fingerprint over history rows (issue 64).
+///
+/// Deterministic by construction: counts come from sorted maps and
+/// ties break alphabetically, so the same rows always produce the same
+/// three cards. Words need a trigram to make a catchphrase, and the
+/// peak hour needs dated rows, so both stay `None` until the history
+/// is thick enough to mean something.
+pub fn fingerprint(rows: &[HistoryEntry], top_n: usize) -> VoiceFingerprint {
+    let mut words: std::collections::BTreeMap<String, usize> = Default::default();
+    let mut trigrams: std::collections::BTreeMap<String, usize> = Default::default();
+    let mut per_hour: [usize; 24] = [0; 24];
+    let mut dated_hours = 0usize;
+
+    for row in rows {
+        let tokens = content_words(&row.raw_text);
+        for w in &tokens {
+            *words.entry(w.clone()).or_default() += 1;
+        }
+        for w in tokens.windows(3) {
+            *trigrams.entry(w.join(" ")).or_default() += 1;
+        }
+        if row.created_at > 0 {
+            // Hours are UTC because that is what the timestamp is.
+            // Naming the zone in the caller keeps this honest: local
+            // hour needs a timezone the store does not carry.
+            let hour = ((row.created_at.rem_euclid(86_400)) / 3600) as usize;
+            if hour < 24 {
+                per_hour[hour] += 1;
+                dated_hours += 1;
+            }
+        }
+    }
+
+    // Most frequent first, ties alphabetical so the order never wobbles.
+    let mut ranked: Vec<(String, usize)> = words.into_iter().filter(|(_, n)| *n > 0).collect();
+    ranked.sort_by(|a, b| b.1.cmp(&a.1).then_with(|| a.0.cmp(&b.0)));
+    ranked.truncate(top_n);
+
+    // A phrase used once is noise, so a catchphrase needs a repeat.
+    // Ties break alphabetically ascending, spelled out here rather
+    // than left to `max_by`, whose reversal is easy to misread.
+    let mut catchphrase: Option<(String, usize)> = None;
+    for (phrase, count) in trigrams {
+        if count <= 1 {
+            continue;
+        }
+        let better = match &catchphrase {
+            None => true,
+            Some((best_phrase, best_count)) => {
+                count > *best_count || (count == *best_count && phrase < *best_phrase)
+            }
+        };
+        if better {
+            catchphrase = Some((phrase, count));
+        }
+    }
+
+    let peak_hour = (dated_hours >= 2)
+        .then(|| {
+            per_hour
+                .iter()
+                .enumerate()
+                .max_by_key(|(h, n)| (**n, std::cmp::Reverse(*h)))
+                .map(|(h, n)| (h as u32, *n))
+        })
+        .flatten();
+
+    VoiceFingerprint {
+        top_words: ranked,
+        catchphrase,
+        peak_hour,
+    }
 }
 
 /// Nearest-rank percentile over sorted values. Empty reads zero.
@@ -138,6 +257,7 @@ pub fn summarize(rows: &[HistoryEntry], dict: &[String], today_idx: i64) -> Summ
         days,
         streak_days,
         top_apps,
+        fingerprint: fingerprint(rows, 8),
     }
 }
 
@@ -213,6 +333,129 @@ mod tests {
         assert_eq!(s.top_apps, vec![("chat".into(), 1), ("docs".into(), 1)]);
         assert_eq!(s.days.len(), 2);
         assert_eq!(s.days[1].words, 4);
+    }
+
+    #[test]
+    fn fingerprint_ranks_content_words_and_finds_the_repeated_phrase() {
+        let rows = vec![
+            row(
+                1,
+                "the deploy pipeline broke again because the cache was stale",
+                None,
+                10,
+                None,
+                20_000,
+            ),
+            row(
+                2,
+                "the deploy pipeline broke again because the cache was stale",
+                None,
+                10,
+                None,
+                20_000,
+            ),
+            row(3, "ship it", None, 10, None, 20_000),
+        ];
+        let f = fingerprint(&rows, 8);
+        // Stopwords ("the", "it", "was") never appear.
+        let words: Vec<&str> = f.top_words.iter().map(|(w, _)| w.as_str()).collect();
+        assert!(!words.contains(&"the"), "{words:?}");
+        assert!(!words.contains(&"it"), "{words:?}");
+        assert!(!words.contains(&"was"), "{words:?}");
+        // The repeated trigram wins and repeats matter.
+        // Four trigrams repeat equally; the alphabetical tie-break makes
+        // "again because cache" the winner every time.
+        assert_eq!(f.catchphrase, Some(("again because cache".into(), 2)));
+        // Ties break alphabetically, so the order never wobbles.
+        assert!(words.contains(&"cache"), "{words:?}");
+    }
+
+    #[test]
+    fn fingerprint_is_deterministic_across_identical_reads() {
+        let rows = vec![
+            row(1, "alpha beta gamma delta", None, 10, None, 20_000),
+            row(2, "alpha beta gamma delta", None, 10, None, 20_001),
+            row(3, "epsilon zeta", None, 10, None, 20_001),
+        ];
+        assert_eq!(fingerprint(&rows, 5), fingerprint(&rows, 5));
+        // Reordering rows must not change the answer either.
+        let mut shuffled = rows.clone();
+        shuffled.reverse();
+        assert_eq!(fingerprint(&rows, 5), fingerprint(&shuffled, 5));
+    }
+
+    #[test]
+    fn fingerprint_withholds_answers_it_cannot_support() {
+        // One session: no repeated phrase, no peak hour worth naming.
+        let rows = vec![row(1, "hello world", None, 10, None, 20_000)];
+        let f = fingerprint(&rows, 5);
+        assert_eq!(f.catchphrase, None, "a phrase used once is noise");
+        assert_eq!(f.peak_hour, None, "one timestamp is not a pattern");
+        // A single row can still name words; it cannot name patterns.
+        assert_eq!(f.top_words, vec![("hello".into(), 1), ("world".into(), 1)]);
+        // All-stopword text yields nothing rather than filler.
+        let filler = vec![row(1, "the and of it is", None, 10, None, 20_000)];
+        assert!(fingerprint(&filler, 5).top_words.is_empty());
+        // Empty history says nothing at all rather than guessing.
+        assert_eq!(fingerprint(&[], 5).top_words, Vec::new());
+    }
+
+    #[test]
+    fn peak_hour_counts_utc_and_breaks_ties_early() {
+        // 09:00 UTC twice, 14:00 UTC once: the busiest hour wins.
+        let nine = 20_000 * 86_400 + 9 * 3600;
+        let nine2 = 20_000 * 86_400 + 9 * 3600 + 60;
+        let fourteen = 20_000 * 86_400 + 14 * 3600;
+        let rows = vec![
+            row(1, "a b c", None, 10, None, 20_000),
+            HistoryEntry {
+                session: SessionId::new(2),
+                raw_text: "d e f".into(),
+                cleaned_text: None,
+                provider: "local".into(),
+                latency_ms: 10,
+                app: None,
+                created_at: nine,
+            },
+            HistoryEntry {
+                session: SessionId::new(3),
+                raw_text: "g h i".into(),
+                cleaned_text: None,
+                provider: "local".into(),
+                latency_ms: 10,
+                app: None,
+                created_at: nine2,
+            },
+            HistoryEntry {
+                session: SessionId::new(4),
+                raw_text: "j k l".into(),
+                cleaned_text: None,
+                provider: "local".into(),
+                latency_ms: 10,
+                app: None,
+                created_at: fourteen,
+            },
+        ];
+        assert_eq!(fingerprint(&rows, 5).peak_hour, Some((9, 2)));
+    }
+
+    #[test]
+    fn summary_carries_the_fingerprint() {
+        let rows = vec![row(
+            1,
+            "susurro dictates fast and susurro ships fast",
+            None,
+            10,
+            None,
+            20_000,
+        )];
+        let s = summarize(&rows, &[], 20_000);
+        // "susurro" and "fast" both appear twice; the tie breaks
+        // alphabetically, so "fast" leads.
+        assert_eq!(s.fingerprint.top_words[0], ("fast".into(), 2));
+        assert_eq!(s.fingerprint.top_words[1], ("susurro".into(), 2));
+        // "and" is a stopword and never reaches the card.
+        assert!(!s.fingerprint.top_words.iter().any(|(w, _)| w == "and"));
     }
 
     #[test]
