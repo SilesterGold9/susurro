@@ -16,8 +16,11 @@ AppImage / .deb (Linux), MSI plus NSIS setup (Windows), plus standalone `susurro
 ./Susurro_1.1.0_amd64.AppImage
 ```
 
-The app needs whisper.cpp (`whisper-cli`), a whisper model, and (for
-paste) `wl-copy` + `ydotool`/`ydotoold` — see `susurro doctor`.
+The app ships the whisper engine linked in, so there is no binary to
+install: first run fetches the speech model into the models dir
+itself (`susurro model-fetch` does the same from the terminal, with
+resume). For paste it needs nothing extra on Windows; on Linux it
+needs `wl-copy` + `ydotool`/`ydotoold` — see `susurro doctor`.
 In-app updates check `latest.json` and surface a quiet indicator in
 settings (never a forced modal). First run walks through four setup
 screens: model download, hotkey pick, test dictation, done.
@@ -26,8 +29,9 @@ screens: model download, hotkey pick, test dictation, done.
 
 ```sh
 mkdir -p ~/.local/share/susurro/models
-# from https://huggingface.co/ggerganov/whisper.cpp — ggml base.en
-# place as ~/.local/share/susurro/models/base.en.bin
+# Normally fetched automatically (onboarding or `susurro model-fetch`).
+# Manual placement also works, from https://huggingface.co/ggerganov/whisper.cpp:
+# ggml base.en as ~/.local/share/susurro/models/base.en.bin
 # or: export SUSURRO_MODEL=/path/to/base.en.bin
 ```
 
@@ -59,6 +63,7 @@ cargo run -p susurro-cli -- daemon        # hotkey loop: press SUPER_SHIFT+R, sp
 | `privacy-add`, `privacy-remove`, `privacy-list` | Per-app local-only routing |
 | `profile-add`, `profile-remove`, `profile-list` | Per-app tone: formal, casual, verbatim |
 | `bench`, `stt-bench` | CPU tier benchmark / backend race with persisted winner |
+| `model-fetch` | Fetch a model with resume, hash check, atomic swap |
 | `model-check` | Verify the model checksum |
 | `replay` | Session event log replay for debugging |
 
