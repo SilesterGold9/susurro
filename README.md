@@ -13,7 +13,7 @@ AppImage / .deb (Linux), MSI plus NSIS setup (Windows), plus standalone `susurro
 
 ```sh
 # Linux quick start
-./Susurro_1.1.0_amd64.AppImage
+./Susurro_1.2.0_amd64.AppImage
 ```
 
 The app ships the whisper engine linked in, so there is no binary to
