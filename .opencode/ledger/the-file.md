@@ -23,18 +23,24 @@ The resume file. Read before acting, append before leaving.
 
 ## Next actions
 
-- Open queue, verified against GitHub 2026-10-05 (all OPEN): 56 post-dictation
-  rewrites, 57 scratchpad notepad, 60 Silero VAD, 61 auto language
-  detect, 62 wake word spike, 65 voidEngine i18n. 58 deferred above.
+- Open queue, verified against GitHub 2026-10-05 (all OPEN): 57 scratchpad
+  notepad, 60 Silero VAD, 61 auto language detect, 62 wake word spike,
+  65 voidEngine i18n. 58 deferred above. 56 and 64 closed this session.
+- 57 is the sibling of 56: one page, one SQLite table, one port. Smallest
+  remaining item.
 - 60 and 61 both need whisper-cli flags (`--vad -vm`, `-l auto`) that
   the linked engine does not expose. Ruling needed: re-expose the flags,
   or move the VAD to the energy port and the language to the model.
-- Decide whether `skills/verification/SKILL.md` should also be versioned: it is generated from the constitution but currently git-ignored, so fresh clones regenerate it via `conclave init`.
+- Rewriting transforms (organize/shorten/formalize) are proven only along
+  their failure path. Re-prove in the passing direction with a pulled
+  Ollama model before calling them done.
 
 ## Closed this session
 
+- 2026-10-05: transforms (verdict `2026-10-05-transforms`): four named rewrites,
+  preview by default, `set_cleaned` never touches raw. Closes issue 56.
 - 2026-10-05: voice fingerprint (verdict `2026-10-05-voice-fingerprint`):
-  deterministic counting for three Insights cards, closing issue 64.
+  deterministic counting for three Insights cards. Closes issue 64.
 - 2026-10-05: ONNX punctuation default (verdict `2026-10-05-onnx-cleanup-default`):
   7.6 MB bundled model replaces "install Ollama" as the default cleanup;
   sherpa-onnx `shared` feature forced by the Windows CRT mismatch.
