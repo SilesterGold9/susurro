@@ -149,6 +149,29 @@ impl SqliteHistory {
         out
     }
 
+    /// Replace the cleaned text of one stored session (issue 56).
+    ///
+    /// A transform writes `cleaned_text` and never `raw_text`, which
+    /// is what keeps the original one restore away: the raw column is
+    /// the reference every transform is measured against, so
+    /// overwriting it would destroy the only undo. Returns the row
+    /// count so callers can tell "not found" from "written".
+    pub fn set_cleaned(
+        &self,
+        session: susurro_core::SessionId,
+        cleaned: &str,
+    ) -> Result<usize, CoreError> {
+        let conn = self
+            .conn
+            .lock()
+            .map_err(|e| CoreError::Storage(format!("db lock poisoned: {e}")))?;
+        conn.execute(
+            "UPDATE history SET cleaned_text = ?2 WHERE session = ?1",
+            rusqlite::params![format!("{:032x}", session.0), cleaned],
+        )
+        .map_err(|e| CoreError::Storage(e.to_string()))
+    }
+
     /// Every row for usage stats (v0.9.0, issue 43), oldest first.
     /// Bounded so a huge history cannot OOM the stats view.
     // allow(let_and_return): binding forces the row iterator to drop
@@ -994,6 +1017,49 @@ mod tests {
         assert_eq!(recent[0].1, 1);
         assert_eq!(recent[1].0, a.to_string());
         assert_eq!(recent[1].1, 2);
+        let _ = std::fs::remove_file(&p);
+    }
+
+    #[test]
+    fn set_cleaned_rewrites_the_clean_column_only() {
+        let p = tmp_path("history-set-cleaned");
+        let mut h = SqliteHistory::open(&p).unwrap();
+        let s = susurro_core::SessionId::new(0xfeed01);
+        h.upsert(HistoryEntry {
+            session: s,
+            raw_text: "the raw transcript stays put".into(),
+            cleaned_text: Some("The raw transcript stays put.".into()),
+            provider: "local".into(),
+            latency_ms: 100,
+            app: None,
+            created_at: 20_000 * 86_400,
+        })
+        .unwrap();
+
+        assert_eq!(
+            h.set_cleaned(s, "The raw transcript stays put, organized.")
+                .unwrap(),
+            1
+        );
+        let rows = h.recent(10).unwrap();
+        assert_eq!(rows.len(), 1);
+        // The whole point: a transform writes the clean column and the
+        // raw column is the untouched reference behind restore.
+        assert_eq!(
+            rows[0].raw_text, "the raw transcript stays put",
+            "raw must survive every transform"
+        );
+        assert_eq!(
+            rows[0].cleaned_text.as_deref(),
+            Some("The raw transcript stays put, organized.")
+        );
+
+        // An unknown session reports zero rows rather than inventing one.
+        assert_eq!(
+            h.set_cleaned(susurro_core::SessionId::new(0xdead), "x")
+                .unwrap(),
+            0
+        );
         let _ = std::fs::remove_file(&p);
     }
 }

@@ -6,7 +6,8 @@ import InsightsPage from "./pages/insights";
 import DictionaryPage from "./pages/dictionary";
 import SnippetsPage from "./pages/snippets";
 import StylePage from "./pages/style";
-import { TransformsPage, ScratchpadPage } from "./pages/placeholders";
+import TransformsPage from "./pages/transforms";
+import { ScratchpadPage } from "./pages/placeholders";
 import SystemPage from "./pages/system";
 import HelpPage from "./pages/help";
 import {

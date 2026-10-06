@@ -1133,6 +1133,122 @@ fn list_history(limit: u64) -> Result<Vec<HistoryRow>, String> {
 /// Re-inject one session's raw transcript (v0.8.0, issue 39
 /// addendum): the undo-AI-edit toggle. History keeps the entry;
 /// restoring twice pastes twice, which is the operator asking twice.
+/// Recent sessions with their raw and current text, for the
+/// Transforms page (issue 56). Every session is transformable: a user
+/// wanting to reorganize yesterday's notes is the normal case, not an
+/// edge case.
+#[tauri::command]
+fn transform_candidates(limit: u64) -> Result<Vec<HistoryRow>, String> {
+    list_history(limit)
+}
+
+/// One transform, previewed and not stored (issue 56).
+///
+/// The preview is the point: the page shows the result beside the raw
+/// transcript and the user commits it. `outcome` says whether the
+/// bundled engine tidied it or a model rewrote it, so the page never
+/// has to guess from the text itself.
+#[tauri::command]
+fn preview_transform(
+    session: String,
+    name: String,
+    state: State<'_, Arc<AppState>>,
+) -> Result<serde_json::Value, String> {
+    let (text, outcome) = run_transform(&state, &session, &name, false)?;
+    Ok(serde_json::json!({
+        "session": session,
+        "name": name,
+        "text": text,
+        "outcome": outcome,
+    }))
+}
+
+/// Commit a previewed transform to the session's cleaned text. The raw
+/// column is never written, so restore stays one step away.
+#[tauri::command]
+fn apply_transform(
+    session: String,
+    name: String,
+    state: State<'_, Arc<AppState>>,
+) -> Result<serde_json::Value, String> {
+    let (text, outcome) = run_transform(&state, &session, &name, true)?;
+    Ok(serde_json::json!({
+        "session": session,
+        "name": name,
+        "text": text,
+        "outcome": outcome,
+    }))
+}
+
+/// Shared body for preview and apply: resolve the session, run the
+/// named tier over the raw transcript, and store only when `store`.
+///
+/// Rewriting tiers fail open to the regex tidier, so a result identical
+/// to the tidier means the engine never ran. That reports as
+/// `unavailable` rather than as a rewrite, because claiming a model
+/// reorganised text it never saw is the one thing this feature must
+/// not do.
+fn run_transform(
+    state: &Arc<AppState>,
+    session: &str,
+    name: &str,
+    store: bool,
+) -> Result<(String, &'static str), String> {
+    let which = susurro_core::transforms::Transform::parse(name).map_err(|e| e.to_string())?;
+    let settings = state.settings.lock().map_err(|e| e.to_string())?.clone();
+    let history = susurro_storage::SqliteHistory::open(&shared_db_path())
+        .map_err(|e| e.to_string())?;
+    let entries = history.recent(50).map_err(|e| e.to_string())?;
+    let entry = susurro_core::ports::find_history_entry(&entries, session)
+        .map_err(|e| e.to_string())?;
+    // Always start from raw: stacking transforms would otherwise feed
+    // one model's rewrite into the next.
+    let source = entry.raw_text.trim().to_string();
+    if source.is_empty() {
+        return Err("this session has no transcript to transform.".into());
+    }
+    let punct = punct_paths(bundled_punct_of(state).as_deref());
+    let cleaner = susurro_adapters_cleanup::by_name(
+        which.tier(),
+        punct,
+        &settings.ollama_model,
+    )?;
+    let result = cleaner.cleanup(&source).map_err(|e| e.to_string())?;
+    let trimmed = result.trim().to_string();
+    if trimmed.is_empty() {
+        return Err(format!(
+            "the {} tier returned nothing; text unchanged.",
+            which.tier()
+        ));
+    }
+    if which.rewrites()
+        && trimmed == susurro_adapters_cleanup::regex_cleanup_text(&source)
+    {
+        return Err(format!(
+            "the {} tier failed open to the tidier, and {} rewrites text. Start the server and pull the model.",
+            which.tier(),
+            which.label()
+        ));
+    }
+    if trimmed == source {
+        return Ok((trimmed, "unchanged"));
+    }
+    if store {
+        let written = history
+            .set_cleaned(entry.session, &trimmed)
+            .map_err(|e| e.to_string())?;
+        if written == 0 {
+            return Err("this session vanished before the write.".into());
+        }
+    }
+    let outcome = if which.rewrites() {
+        "rewritten"
+    } else {
+        "tidied"
+    };
+    Ok((trimmed, outcome))
+}
+
 #[tauri::command]
 fn restore_session(session: String) -> Result<String, String> {
     let h = susurro_storage::SqliteHistory::open(&shared_db_path())
@@ -1843,6 +1959,9 @@ fn main() {
             run_doctor,
             list_history,
             restore_session,
+            transform_candidates,
+            preview_transform,
+            apply_transform,
             list_format_profiles,
             save_format_profile,
             remove_format_profile,

@@ -162,6 +162,21 @@ enum Cmd {
     /// Show usage stats: per-day words, streak, top apps, dictionary
     /// hits, plus end-to-end latency percentiles.
     Stats,
+    /// Apply a named rewrite to a past dictation (issue 56). Tidy runs
+    /// on the bundled engine; organize, shorten, and formalize need
+    /// the opt-in Ollama tier. Prints the result without storing it
+    /// unless --apply, so a rewrite is always previewed first.
+    Transform {
+        /// Transform name: tidy, organize, shorten, or formalize.
+        name: String,
+        /// Session id or unique prefix. Empty means the latest.
+        #[arg(default_value = "")]
+        session: String,
+        /// Store the result over the session's cleaned text. The raw
+        /// transcript is never touched, so restore stays one step away.
+        #[arg(long, default_value_t = false)]
+        apply: bool,
+    },
     /// Verify the whisper model checksum (trust on first use, compare
     /// after). Fails when the file is missing or corrupted.
     ModelCheck,
@@ -384,6 +399,11 @@ fn main() -> anyhow::Result<()> {
         }
         Cmd::History { limit } => show_history(limit),
         Cmd::Stats => show_stats(),
+        Cmd::Transform {
+            name,
+            session,
+            apply,
+        } => transform(&name, &session, apply),
         Cmd::ModelCheck => model_check(),
         Cmd::Converge { once, force } => converge(once, force),
         Cmd::ModelFetch { tiny, force } => model_fetch(tiny, force),
@@ -2174,6 +2194,90 @@ fn wipe(yes: bool) -> anyhow::Result<()> {
 /// Usage plus latency stats (v0.9.0, issue 43): the user-facing
 /// half (words, streak, top apps, dictionary hits) beside the
 /// engineering half (end-to-end latency percentiles).
+/// Apply a named rewrite to one stored session (issue 56).
+///
+/// Preview by default: the rewrite prints and nothing is stored, so the
+/// user sees what an engine did before committing it. `--apply` writes
+/// only `cleaned_text`, which is what keeps `raw_text` intact and
+/// restore one step away.
+fn transform(name: &str, session: &str, apply: bool) -> anyhow::Result<()> {
+    use susurro_adapters_cleanup::{by_name, PunctPaths};
+    use susurro_core::transforms::Transform;
+    let which = Transform::parse(name).map_err(|e| anyhow::anyhow!("{e}"))?;
+    let history = susurro_storage::SqliteHistory::open(&db_path())
+        .map_err(|e| anyhow::anyhow!("Couldn't open history: {e}"))?;
+    let entries = history
+        .recent(50)
+        .map_err(|e| anyhow::anyhow!("Couldn't read history: {e}"))?;
+    if entries.is_empty() {
+        anyhow::bail!("no history yet. Dictate something first.");
+    }
+    let entry = susurro_core::ports::find_history_entry(&entries, session)
+        .map_err(|e| anyhow::anyhow!("{e}"))?;
+    // Transforms start from the raw transcript every time, so stacking
+    // two transforms cannot compound one model's rewrite into the next.
+    let source = entry.raw_text.trim();
+    if source.is_empty() {
+        anyhow::bail!("session {session} has no transcript to transform.");
+    }
+    println!("transform: {}", which.label());
+    println!("  {}", which.blurb());
+    println!("  engine: {} tier", which.tier());
+    println!("raw: {source}");
+
+    let punct = punct_paths().map(|p| PunctPaths {
+        model: p.model,
+        vocab: p.vocab,
+    });
+    let cleaner = by_name(which.tier(), punct, "qwen3:0.6b").map_err(|e| anyhow::anyhow!("{e}"))?;
+    let result = cleaner
+        .cleanup(source)
+        .map_err(|e| anyhow::anyhow!("{e}"))?;
+    let trimmed = result.trim();
+    if trimmed.is_empty() {
+        anyhow::bail!(
+            "the {} tier returned nothing; text unchanged.",
+            which.tier()
+        );
+    }
+    // Honesty check for the rewriting tiers, before the unchanged branch.
+    // They fail open to the regex tidier when the LLM is unreachable, so a
+    // result that is exactly the tidier is not a rewrite at all, whether
+    // or not it differs from the source. Reporting it as one would claim
+    // the model reorganised something it never saw.
+    if which.rewrites() && trimmed == susurro_adapters_cleanup::regex_cleanup_text(source) {
+        println!(
+            "result: unavailable. The {} tier failed open to the tidier, and {} rewrites text.",
+            which.tier(),
+            which.label()
+        );
+        println!("start the server (ollama serve) and pull the model, then retry. Nothing stored.");
+        return Ok(());
+    }
+    if trimmed == source {
+        println!("result: unchanged (the tier had nothing to change)");
+        return Ok(());
+    }
+    let outcome = if which.rewrites() {
+        "rewritten by the model"
+    } else {
+        "tidied on device"
+    };
+    println!("result ({outcome}): {trimmed}");
+    if !apply {
+        println!("preview only. Store it with --apply.");
+        return Ok(());
+    }
+    let written = history
+        .set_cleaned(entry.session, trimmed)
+        .map_err(|e| anyhow::anyhow!("Couldn't store the transform: {e}"))?;
+    if written == 0 {
+        anyhow::bail!("session {} vanished before the write.", entry.session);
+    }
+    println!("stored. The raw transcript is untouched: susurro restore {session}");
+    Ok(())
+}
+
 fn show_stats() -> anyhow::Result<()> {
     let history = susurro_storage::SqliteHistory::open(&db_path())
         .map_err(|e| anyhow::anyhow!("Couldn't open history: {e}"))?;

@@ -18,6 +18,7 @@ pub mod stages;
 pub mod state;
 pub mod stats;
 pub mod suggest;
+pub mod transforms;
 pub mod words;
 
 pub use error::CoreError;
